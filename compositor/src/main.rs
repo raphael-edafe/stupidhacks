@@ -194,7 +194,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // Clean up children on exit.
     for c in data.state.children.iter_mut() {
-        let _ = c.kill();
+        state::kill_tree(c);
     }
     Ok(())
 }
@@ -271,7 +271,7 @@ fn render_frame(f: &mut Frame, st: &mut Siege) {
         }
         for &i in order.iter().rev() {
             let w = &st.windows[i];
-            let Some(mut r) = st.window_rect(w, ow, oh) else { continue };
+            let Some((mut r, sx, sy)) = st.window_placement(w, ow, oh) else { continue };
             let mut alpha = 1.0;
             let zoomed = st.screens.iter().map(|s| s.zoom).fold(0.0f32, f32::max);
             let my_zoom = w.screen.and_then(|id| st.screens.iter().find(|s| s.id == id)).map(|s| s.zoom).unwrap_or(0.0);
@@ -291,8 +291,6 @@ fn render_frame(f: &mut Frame, st: &mut Siege) {
             }
             let geo = w.window.geometry();
             let loc = (r.loc - geo.loc).to_physical(1);
-            let sx = r.size.w as f64 / geo.size.w.max(1) as f64;
-            let sy = r.size.h as f64 / geo.size.h.max(1) as f64;
             let surf: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = w.window.render_elements(renderer, loc, Scale::from(1.0), alpha);
             for e in surf {
                 elements.push(SiegeElement::Window(RescaleRenderElement::from_element(e, r.loc.to_physical(1), Scale { x: sx, y: sy })));
@@ -318,13 +316,22 @@ fn render_frame(f: &mut Frame, st: &mut Siege) {
         if st.frame % 30 == 0 {
             tracing::debug!("timing: sim {:?} draw {:?} gl {:?}", t_sim, t_draw, t_gl);
         }
-        if ok && shot_due {
-            if let Some((_, path)) = st.opts.shots.first().cloned() {
-                save_shot(renderer, &fb, ow, oh, &path);
+        // Only copy here; mapping makes the context surfaceless, so it waits until
+        // after submit (mapping before submit made eglSwapBuffers fail with BAD_SURFACE).
+        let shot = if ok && shot_due {
+            match renderer.copy_framebuffer(&fb, Rectangle::from_size((ow, oh).into()), Fourcc::Abgr8888) {
+                Ok(m) => Some(m),
+                Err(e) => {
+                    warn!("screenshot copy failed: {e:?}");
+                    None
+                }
             }
-        }
-        ok
+        } else {
+            None
+        };
+        (ok, shot)
     };
+    let (render_ok, shot) = render_ok;
     if render_ok {
         if let Err(e) = f.backend.submit(Some(&[Rectangle::from_size(size)])) {
             warn!("submit failed: {e:?}");
@@ -332,6 +339,9 @@ fn render_frame(f: &mut Frame, st: &mut Siege) {
     }
     if st.frame % 30 == 0 {
         tracing::debug!("timing: after submit {:?}", now.elapsed());
+    }
+    if let (Some(mapping), Some((_, path))) = (shot, st.opts.shots.first()) {
+        save_shot(f.backend.renderer(), &mapping, ow, oh, path);
     }
     if shot_due {
         st.opts.shots.remove(0);
@@ -360,16 +370,8 @@ fn render_frame(f: &mut Frame, st: &mut Siege) {
     }
 }
 
-fn save_shot(renderer: &mut GlesRenderer, fb: &<GlesRenderer as smithay::backend::renderer::RendererSuper>::Framebuffer<'_>, w: i32, h: i32, path: &str) {
-    let region = Rectangle::from_size((w, h).into());
-    let mapping = match renderer.copy_framebuffer(fb, region, Fourcc::Abgr8888) {
-        Ok(m) => m,
-        Err(e) => {
-            warn!("screenshot copy failed: {e:?}");
-            return;
-        }
-    };
-    let bytes = match renderer.map_texture(&mapping) {
+fn save_shot(renderer: &mut GlesRenderer, mapping: &<GlesRenderer as ExportMem>::TextureMapping, w: i32, h: i32, path: &str) {
+    let bytes = match renderer.map_texture(mapping) {
         Ok(b) => b.to_vec(),
         Err(e) => {
             warn!("screenshot map failed: {e:?}");
@@ -380,7 +382,13 @@ fn save_shot(renderer: &mut GlesRenderer, fb: &<GlesRenderer as smithay::backend
     let stride = (w * 4) as usize;
     let mut flipped = Vec::with_capacity(bytes.len());
     for row in (0..h as usize).rev() {
-        flipped.extend_from_slice(&bytes[row * stride..(row + 1) * stride]);
+        if let Some(r) = bytes.get(row * stride..(row + 1) * stride) {
+            flipped.extend_from_slice(r);
+        }
+    }
+    if flipped.len() != stride * h as usize {
+        warn!("screenshot: unexpected buffer size {}", bytes.len());
+        return;
     }
     let write = || -> Result<(), Box<dyn std::error::Error>> {
         let file = std::fs::File::create(path)?;

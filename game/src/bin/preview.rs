@@ -263,6 +263,7 @@ fn interactive(seed: u64, scale: usize) {
         (Key::Hotbar3, &[K::Key3][..]),
         (Key::Hotbar4, &[K::Key4][..]),
         (Key::Hotbar5, &[K::Key5][..]),
+        (Key::Hotbar6, &[K::Key6][..]),
     ];
 
     while window.is_open() {

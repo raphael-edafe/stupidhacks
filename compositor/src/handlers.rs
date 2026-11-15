@@ -58,6 +58,7 @@ impl CompositorHandler for Siege {
             }
             if let Some(w) = self.windows.iter().find(|w| w.window.toplevel().is_some_and(|t| t.wl_surface() == &root)) {
                 w.window.on_commit();
+                tracing::trace!("commit: geometry {:?}, configured {:?}", w.window.geometry(), w.configured);
             }
         }
 

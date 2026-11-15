@@ -68,6 +68,7 @@ pub enum Key {
     Hotbar3,
     Hotbar4,
     Hotbar5,
+    Hotbar6,
 }
 
 /// Snapshot of input for one tick. Edge detection ("pressed this frame") is

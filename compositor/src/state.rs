@@ -22,10 +22,10 @@ use smithay::{
     },
     utils::{Logical, Point, Rectangle, SERIAL_COUNTER},
     wayland::{
-        compositor::{CompositorClientState, CompositorState},
+        compositor::{with_states, CompositorClientState, CompositorState},
         output::OutputManagerState,
         selection::data_device::DataDeviceState,
-        shell::xdg::{decoration::XdgDecorationState, XdgShellState},
+        shell::xdg::{decoration::XdgDecorationState, SurfaceCachedState, XdgShellState},
         shm::ShmState,
         socket::ListeningSocketSource,
     },
@@ -233,8 +233,10 @@ impl Siege {
         if let Some(app) = self.opts.autolaunch {
             if self.start_time.elapsed() > Duration::from_millis(1500) && self.game.screens.list.is_empty() && self.frame < 100_000 {
                 let w = &self.game.world;
-                let tx = w.w / 2 - 2;
-                let ty = w.surface[tx as usize] - 13;
+                // Center the screen over the player so the whole frame is on camera.
+                let px = (self.game.player.x / game::world::TILE as f32) as i32;
+                let tx = (px - 11).clamp(0, (w.w - 22).max(0));
+                let ty = w.surface.get((tx + 11) as usize).copied().unwrap_or(40) - 13;
                 self.game.screens.spawn(tx, ty, 22, 11);
                 self.opts.autolaunch = Some(app | 0x1000); // mark as done
             }
@@ -249,7 +251,7 @@ impl Siege {
             GameEvent::ScreenBuilt { id } => {
                 info!("screen {id} built");
                 if let Some(app) = self.opts.autolaunch {
-                    let keys = [Key::Hotbar1, Key::Hotbar2, Key::Hotbar3, Key::Hotbar4, Key::Hotbar5];
+                    let keys = [Key::Hotbar1, Key::Hotbar2, Key::Hotbar3, Key::Hotbar4, Key::Hotbar5, Key::Hotbar6];
                     if let Some(k) = keys.get(app & 0xFFF) {
                         self.autopick = Some((Instant::now() + Duration::from_millis(700), *k, 0));
                     }
@@ -299,6 +301,9 @@ impl Siege {
             c.args(&entry.command[1..]);
             c
         };
+        // Own process group, so the whole tree (dbus-run-session's private bus and
+        // the services it activates) can be terminated together; see kill_tree().
+        std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
         cmd.env("WAYLAND_DISPLAY", &self.socket_name)
             .env_remove("DISPLAY")
             .env("GDK_BACKEND", "wayland")
@@ -356,8 +361,15 @@ impl Siege {
             }
             true
         });
-        // Reap exited children so they don't linger as zombies.
-        self.children.retain_mut(|c| matches!(c.try_wait(), Ok(None)));
+        // Reap exited children so they don't linger as zombies, and terminate
+        // anything they left behind in their process group (dbus-daemon, gvfsd...).
+        self.children.retain_mut(|c| match c.try_wait() {
+            Ok(None) => true,
+            _ => {
+                term_group(c.id());
+                false
+            }
+        });
     }
 
     // ---------------- windows ----------------
@@ -419,10 +431,12 @@ impl Siege {
                 continue;
             }
             let r = self.view.rect(info.rect);
-            let size = (r.size.w, r.size.h);
+            let min = w.window.toplevel().map(|t| min_size(t.wl_surface())).unwrap_or_default();
+            let size = fit_min_size((r.size.w, r.size.h), min);
             if w.configured != Some(size) {
                 if let Some(t) = w.window.toplevel() {
-                    t.with_pending_state(|s| s.size = Some(r.size));
+                    tracing::debug!("configure {size:?} (rect {:?}, client min {min:?})", r.size);
+                    t.with_pending_state(|s| s.size = Some(size.into()));
                     if t.is_initial_configure_sent() {
                         t.send_pending_configure();
                     }
@@ -444,16 +458,38 @@ impl Siege {
         }
     }
 
+    /// Where a window's content (its geometry box) is drawn and how it is scaled.
+    /// Normally the content is stretched to the screen rect (that hides the lag while
+    /// the client catches up with a resize during zoom). Once the screen has settled,
+    /// a window that refused our size (e.g. a minimum size, like gnome-calculator)
+    /// is scaled uniformly to fit and centered instead of being squashed.
+    pub fn window_placement(&self, w: &WinEntry, out_w: i32, out_h: i32) -> Option<(Rectangle<i32, Logical>, f64, f64)> {
+        let r = self.window_rect(w, out_w, out_h)?;
+        let geo = w.window.geometry();
+        let (gw, gh) = (geo.size.w.max(1) as f64, geo.size.h.max(1) as f64);
+        let sx = r.size.w as f64 / gw;
+        let sy = r.size.h as f64 / gh;
+        let settled = w
+            .screen
+            .and_then(|id| self.screens.iter().find(|i| i.id == id))
+            .is_some_and(|i| i.zoom < 0.001 || i.zoom > 0.999);
+        if settled && (sx / sy - 1.0).abs() > 0.02 {
+            let s = sx.min(sy);
+            let (dw, dh) = ((gw * s).round() as i32, (gh * s).round() as i32);
+            let loc = Point::from((r.loc.x + (r.size.w - dw) / 2, r.loc.y + (r.size.h - dh) / 2));
+            return Some((Rectangle::new(loc, (dw.max(1), dh.max(1)).into()), s, s));
+        }
+        Some((r, sx, sy))
+    }
+
     /// Topmost window under an output point: (window index, surface, surface origin in output coords).
     pub fn surface_under(&self, pos: Point<f64, Logical>, out_w: i32, out_h: i32) -> Option<(usize, WlSurface, Point<f64, Logical>)> {
         // Draw order is: bound windows (zoomed last), then floating. Hit-test in reverse.
         let order = self.draw_order();
         for &i in order.iter().rev() {
             let w = &self.windows[i];
-            let Some(r) = self.window_rect(w, out_w, out_h) else { continue };
+            let Some((r, sx, sy)) = self.window_placement(w, out_w, out_h) else { continue };
             let geo = w.window.geometry();
-            let sx = r.size.w as f64 / geo.size.w.max(1) as f64;
-            let sy = r.size.h as f64 / geo.size.h.max(1) as f64;
             // Point in window-local (geometry) coordinates.
             let local = Point::<f64, Logical>::from(((pos.x - r.loc.x as f64) / sx, (pos.y - r.loc.y as f64) / sy));
             let in_rect = r.to_f64().contains(pos);
@@ -508,7 +544,7 @@ impl Siege {
     }
 }
 
-pub const ALL_KEYS: [Key; 19] = [
+pub const ALL_KEYS: [Key; 20] = [
     Key::Left,
     Key::Right,
     Key::Up,
@@ -528,7 +564,43 @@ pub const ALL_KEYS: [Key; 19] = [
     Key::Hotbar3,
     Key::Hotbar4,
     Key::Hotbar5,
+    Key::Hotbar6,
 ];
+
+/// The client's xdg_toplevel min size (0 = unconstrained).
+fn min_size(surface: &WlSurface) -> (i32, i32) {
+    with_states(surface, |states| {
+        let m = states.cached_state.get::<SurfaceCachedState>().current().min_size;
+        (m.w.max(0), m.h.max(0))
+    })
+}
+
+/// Size to configure for a screen rect: the rect itself, or if the client's minimum
+/// size doesn't fit, the rect scaled up (same aspect) until it does, so the window is
+/// later scaled down uniformly to fill the rect instead of being squashed or letterboxed.
+fn fit_min_size(rect: (i32, i32), min: (i32, i32)) -> (i32, i32) {
+    let (w, h) = (rect.0.max(1), rect.1.max(1));
+    let k = (min.0 as f64 / w as f64).max(min.1 as f64 / h as f64);
+    if k <= 1.0 {
+        return (w, h);
+    }
+    ((w as f64 * k).ceil() as i32, (h as f64 * k).ceil() as i32)
+}
+
+/// SIGTERM a launched app's whole process group (its pgid == its pid).
+pub fn term_group(pid: u32) {
+    use smithay::reexports::rustix::process::{kill_process_group, Pid, Signal};
+    if let Some(pid) = i32::try_from(pid).ok().and_then(Pid::from_raw) {
+        let _ = kill_process_group(pid, Signal::TERM);
+    }
+}
+
+/// Terminate a launched app and everything it spawned.
+pub fn kill_tree(child: &mut Child) {
+    term_group(child.id());
+    let _ = child.kill();
+    let _ = child.wait();
+}
 
 fn which(bin: &str) -> bool {
     std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(bin).is_file()))

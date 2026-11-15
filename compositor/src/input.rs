@@ -48,6 +48,7 @@ fn map_key(code: u32) -> Option<Key> {
         4 => Key::Hotbar3,
         5 => Key::Hotbar4,
         6 => Key::Hotbar5,
+        7 => Key::Hotbar6,
         _ => return None,
     })
 }

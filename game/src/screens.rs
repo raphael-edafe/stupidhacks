@@ -514,7 +514,7 @@ impl Screens {
             hover = (hover + 1) % n;
         }
         let mut pick = None;
-        for (i, k) in [Key::Hotbar1, Key::Hotbar2, Key::Hotbar3, Key::Hotbar4, Key::Hotbar5].iter().enumerate() {
+        for (i, k) in [Key::Hotbar1, Key::Hotbar2, Key::Hotbar3, Key::Hotbar4, Key::Hotbar5, Key::Hotbar6].iter().enumerate() {
             if ctl.pressed(*k) && i < n {
                 pick = Some(i);
             }
