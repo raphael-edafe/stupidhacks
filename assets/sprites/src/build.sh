@@ -7,7 +7,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 pxl="${1:-$HOME/.claude/skills/pxl-pixel-art/bin/pxl.js}"
 node="${NODE:-node}"
 out="$here/out"
-for f in player items mobs; do
+for f in player items mobs terrain flora sky; do
   "$node" "$pxl" build "$here/$f.px.js" --out "$out" --no-preview
 done
 dst="$here/.."
