@@ -5,8 +5,10 @@
 //!   B2: sky, light, mobs, hud
 
 pub mod camera;
+pub mod crafting;
 pub mod gfx;
 pub mod hud;
+pub mod items;
 pub mod input;
 pub mod light;
 pub mod mobs;
@@ -20,6 +22,7 @@ pub mod ui;
 pub mod world;
 
 use camera::Camera;
+use crafting::Crafting;
 use gfx::{rgba, Canvas};
 use input::Controls;
 use light::Light;
@@ -44,6 +47,7 @@ pub struct Game {
     pub sky: Sky,
     pub light: Light,
     pub mobs: Mobs,
+    pub crafting: Crafting,
     pub controls: Controls,
     pub events: Vec<GameEvent>,
     pub time: f32,
@@ -72,6 +76,7 @@ impl Game {
             sky: Sky::new(),
             light: Light::new(),
             mobs: Mobs::new(),
+            crafting: Crafting::new(),
             controls: Controls::default(),
             events: Vec::new(),
             time: 0.0,
@@ -103,11 +108,16 @@ impl GameApi for Game {
         self.sky.update(dt);
         let busy = self.screens.update(dt, &ctl, &mut self.cam, &mut self.world, &mut self.particles, &mut self.events, self.player.center());
         // Modal UI (chooser, zoom): the player stands still and can't mine/place.
-        let player_ctl = if busy.frozen { ctl.frozen() } else { ctl };
+        // Workbench crafting panel: E near a bench (unless a screen prompt wants E).
+        let view = (self.cam.vw as i32, self.cam.vh as i32);
+        let e_taken = self.screens.near.is_some() || busy.frozen || busy.mouse;
+        let crafting = self.crafting.update(dt, &ctl, &mut self.player, &self.world, &mut self.particles, view, e_taken);
+        let frozen = busy.frozen || crafting;
+        let player_ctl = if frozen { ctl.frozen() } else { ctl };
 
         // World zoom: wheel / `-` `=` switch between the close and far view.
         // (While a modal UI is up the wheel belongs to it.)
-        if !busy.frozen {
+        if !frozen {
             let far = ctl.cur.wheel < 0.0 || ctl.pressed(Key::ZoomOut);
             let close = ctl.cur.wheel > 0.0 || ctl.pressed(Key::ZoomIn);
             if far && self.cam.vw < FAR_W as f32 {
@@ -116,7 +126,7 @@ impl GameApi for Game {
                 self.cam.set_view(VIEW_W, VIEW_H);
             }
         }
-        self.player.update(dt, &player_ctl, &mut self.cam, &mut self.world, &mut self.particles, busy.mouse || busy.frozen);
+        self.player.update(dt, &player_ctl, &mut self.cam, &mut self.world, &mut self.particles, busy.mouse || frozen);
 
         let mut ctx = MobCtx {
             world: &self.world,
@@ -158,6 +168,8 @@ impl GameApi for Game {
             self.player.draw_cursor(&mut c, &self.cam, &self.world);
             hud::draw(&mut c, self);
         }
+        self.crafting.draw_prompt(&mut c, &self.cam, self.screens.near.is_some());
+        self.crafting.draw(&mut c, &self.player, &self.sprites);
         self.screens.draw_overlay(&mut c, &self.cam);
         self.screens.draw_zoom_fx(&mut c, &self.cam);
     }

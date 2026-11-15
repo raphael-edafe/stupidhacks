@@ -3,6 +3,7 @@
 use crate::camera::Camera;
 use crate::gfx::{rgb, rgba, with_alpha, Canvas};
 use crate::input::Controls;
+use crate::items::{self, Item, Slot, Tier};
 use crate::particles::Particles;
 use crate::sprites::{Sprites, PLAYER_H, PLAYER_W, SWORD_GRIPS};
 use crate::world::{Tile, World, TILE};
@@ -23,7 +24,8 @@ const SHOULDER: (i32, i32) = (9, 15);
 const REACH: f32 = 6.0 * TILE as f32;
 const SWING_TIME: f32 = 0.28;
 
-pub const HOTBAR: [Tile; 5] = [Tile::Dirt, Tile::Stone, Tile::Plank, Tile::Torch, Tile::Crystal];
+/// Hotbar slots (keys 1-6).
+pub const HOTBAR_SLOTS: usize = 6;
 
 pub struct Player {
     /// Top-left of the hitbox, world px.
@@ -38,8 +40,16 @@ pub struct Player {
     pub invuln: f32,
     pub swing: f32,
     pub god: bool,
-    pub inventory: [u32; 12],
+    /// Item counts, indexed by `Item as usize`.
+    pub inventory: [u32; items::COUNT],
+    /// The hotbar: any item kind per slot (blocks, tools, weapons).
+    pub hotbar: [Option<Item>; HOTBAR_SLOTS],
     pub selected: usize,
+    /// Seconds since the selection changed (the HUD shows the item name for a moment).
+    pub select_age: f32,
+    /// Worn armour.
+    pub helmet: Option<Tier>,
+    pub chest: Option<Tier>,
     pub spawn: (f32, f32),
     anim: f32,
     /// Seconds since spawn (idle breathing).
@@ -59,11 +69,7 @@ impl Player {
         let tx = world.w / 2 - 4;
         let gy = world.ground_y(tx);
         let spawn = ((tx * TILE) as f32 + 3.0, (gy * TILE) as f32 - H - 1.0);
-        let mut inventory = [0u32; 12];
-        inventory[Tile::Dirt as usize] = 30;
-        inventory[Tile::Plank as usize] = 20;
-        inventory[Tile::Torch as usize] = 12;
-        Player {
+        let mut p = Player {
             x: spawn.0,
             y: spawn.1,
             vx: 0.0,
@@ -75,8 +81,12 @@ impl Player {
             invuln: 0.0,
             swing: 0.0,
             god: false,
-            inventory,
+            inventory: [0; items::COUNT],
+            hotbar: [None; HOTBAR_SLOTS],
             selected: 0,
+            select_age: 10.0,
+            helmet: None,
+            chest: None,
             spawn,
             anim: 0.0,
             t: 0.0,
@@ -86,7 +96,80 @@ impl Player {
             mining: None,
             place_cooldown: 0.0,
             hover: None,
+        };
+        // Starting kit.
+        for (it, n) in [(Item::WoodSword, 1), (Item::Dirt, 30), (Item::Plank, 20), (Item::Stone, 10), (Item::Torch, 12), (Item::Workbench, 1)] {
+            p.give(it, n);
         }
+        p
+    }
+
+    pub fn count(&self, it: Item) -> u32 {
+        self.inventory[it as usize]
+    }
+
+    /// The item in the selected hotbar slot.
+    pub fn held(&self) -> Option<Item> {
+        self.hotbar[self.selected]
+    }
+
+    /// Add items. A kind you didn't have goes into the first free hotbar slot.
+    pub fn give(&mut self, it: Item, n: u32) {
+        self.inventory[it as usize] += n;
+        if it.hotbar() && !self.hotbar.contains(&Some(it)) {
+            if let Some(slot) = self.hotbar.iter_mut().find(|s| s.is_none()) {
+                *slot = Some(it);
+            }
+        }
+    }
+
+    /// Use up `n` of an item (free in god mode). False if there aren't enough.
+    /// A stack that runs out leaves the hotbar; tools and weapons never run out.
+    pub fn take(&mut self, it: Item, n: u32) -> bool {
+        if self.god {
+            return true;
+        }
+        if self.inventory[it as usize] < n {
+            return false;
+        }
+        self.inventory[it as usize] -= n;
+        if self.inventory[it as usize] == 0 && !it.is_tool() {
+            for s in self.hotbar.iter_mut().filter(|s| **s == Some(it)) {
+                *s = None;
+            }
+        }
+        true
+    }
+
+    /// Total armour defence (each hit does `max(1, dmg - defense)`).
+    pub fn defense(&self) -> i32 {
+        self.helmet.map_or(0, |t| t.defense(Slot::Head)) + self.chest.map_or(0, |t| t.defense(Slot::Body))
+    }
+
+    /// Wear a piece of armour if it's better than what's in that slot.
+    pub fn equip_if_better(&mut self, it: Item) {
+        if let Some((slot, tier)) = it.armour() {
+            let cur = match slot {
+                Slot::Head => &mut self.helmet,
+                Slot::Body => &mut self.chest,
+            };
+            if cur.is_none_or(|c| tier > c) {
+                *cur = Some(tier);
+            }
+        }
+    }
+
+    /// Put an owned item into hotbar slot `slot` (moving it from any other slot).
+    pub fn assign(&mut self, slot: usize, it: Item) {
+        if slot >= HOTBAR_SLOTS || self.count(it) == 0 || !it.hotbar() {
+            return;
+        }
+        for s in self.hotbar.iter_mut().filter(|s| **s == Some(it)) {
+            *s = None;
+        }
+        self.hotbar[slot] = Some(it);
+        self.selected = slot;
+        self.select_age = 0.0;
     }
 
     pub fn center(&self) -> (f32, f32) {
@@ -100,9 +183,11 @@ impl Player {
         self.swing = (self.swing - dt).max(0.0);
         self.place_cooldown = (self.place_cooldown - dt).max(0.0);
 
-        for (i, k) in [Key::Hotbar1, Key::Hotbar2, Key::Hotbar3, Key::Hotbar4, Key::Hotbar5].iter().enumerate() {
+        self.select_age += dt;
+        for (i, k) in [Key::Hotbar1, Key::Hotbar2, Key::Hotbar3, Key::Hotbar4, Key::Hotbar5, Key::Hotbar6].iter().enumerate() {
             if ctl.pressed(*k) {
                 self.selected = i;
+                self.select_age = 0.0;
             }
         }
 
@@ -191,8 +276,9 @@ impl Player {
                 let p = progress + dt * speed / hardness;
                 if p >= 1.0 {
                     world.set(tx, ty, Tile::Air);
-                    let d = target.drop();
-                    self.inventory[d as usize] += 1;
+                    if let Some(it) = Item::from_tile(target) {
+                        self.give(it, 1);
+                    }
                     let (px, py) = ((tx * TILE + 8) as f32, (ty * TILE + 8) as f32);
                     fx.debris(px, py, target.color(), 14);
                     if target == Tile::Crystal {
@@ -216,13 +302,17 @@ impl Player {
             self.mining = None;
         }
 
-        let place_tile = if ctl.pressed(Key::Torch) { Some(Tile::Torch) } else if ctl.rmb() { Some(HOTBAR[self.selected]) } else { None };
-        if let Some(t) = place_tile {
+        // T always places a torch; right click places the held item if it's a block.
+        let place = if ctl.pressed(Key::Torch) {
+            Some(Item::Torch)
+        } else if ctl.rmb() {
+            self.held().filter(|it| it.tile().is_some())
+        } else {
+            None
+        };
+        if let Some((it, t)) = place.and_then(|it| it.tile().map(|t| (it, t))) {
             if self.place_cooldown <= 0.0 && in_reach && target == Tile::Air && self.can_place(tx, ty, world, t) {
-                if self.god || self.inventory[t as usize] > 0 {
-                    if !self.god {
-                        self.inventory[t as usize] -= 1;
-                    }
+                if self.take(it, 1) {
                     world.set(tx, ty, t);
                     fx.debris((tx * TILE + 8) as f32, (ty * TILE + 8) as f32, t.color(), 4);
                     self.place_cooldown = 0.12;
@@ -466,5 +556,41 @@ impl Player {
             }
             c.fill_rect(vx, vy, TILE, TILE, with_alpha(rgb(255, 255, 255), (p * 40.0) as u8));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::world::World;
+
+    #[test]
+    fn starting_kit_fills_the_hotbar() {
+        let p = Player::new(&World::generate(1));
+        assert_eq!(p.hotbar[0], Some(Item::WoodSword));
+        assert!(p.hotbar.iter().all(|s| s.is_some()));
+        assert_eq!(p.count(Item::Dirt), 30);
+    }
+
+    #[test]
+    fn stacks_leave_the_hotbar_when_used_up_and_come_back() {
+        let mut p = Player::new(&World::generate(1));
+        let slot = p.hotbar.iter().position(|s| *s == Some(Item::Workbench)).unwrap();
+        assert!(p.take(Item::Workbench, 1));
+        assert_eq!(p.hotbar[slot], None);
+        assert!(!p.take(Item::Workbench, 1), "can't use what you don't have");
+        p.give(Item::Copper, 3);
+        assert_eq!(p.hotbar[slot], Some(Item::Copper), "a new kind fills the free slot");
+        p.take(Item::WoodSword, 1);
+        assert_eq!(p.hotbar[0], Some(Item::WoodSword), "weapons never leave the hotbar");
+    }
+
+    #[test]
+    fn assign_moves_an_item_between_slots() {
+        let mut p = Player::new(&World::generate(1));
+        p.assign(5, Item::WoodSword);
+        assert_eq!(p.hotbar[5], Some(Item::WoodSword));
+        assert_eq!(p.hotbar[0], None);
+        assert_eq!(p.selected, 5);
     }
 }

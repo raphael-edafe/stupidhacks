@@ -4,6 +4,7 @@
 //! All original art; nothing is copied from any existing game. Owner: person B1.
 
 use crate::gfx::{lerp_color, rgb, rgba, shade, Rgba, Sprite};
+use crate::items::{Item, Tier, ALL as ALL_ITEMS};
 use crate::world::{hash2, Tile, TILE};
 
 pub const VARIANTS: usize = 4;
@@ -35,6 +36,10 @@ pub struct Sprites {
     pub mob_crawler: Vec<Sprite>,
     /// "Bit bat": 3 flap frames (up, level, down), 18x12 each, symmetric.
     pub mob_bat: Vec<Sprite>,
+    /// Hotbar / crafting icon per item, indexed by `Item as usize` (at most 16x16).
+    pub icons: Vec<Sprite>,
+    /// `sword_swing` recoloured per sword tier, indexed by `Tier as usize`.
+    pub sword_tiers: Vec<Vec<Sprite>>,
 }
 
 // --- embedded PNGs (rebuild with assets/sprites/src/build.sh) ---
@@ -180,6 +185,7 @@ impl Sprites {
             Tile::Plank,
             Tile::Torch,
             Tile::Bedrock,
+            Tile::Workbench,
         ];
         let tiles = all
             .iter()
@@ -191,6 +197,33 @@ impl Sprites {
         let pickaxe = load(PICKAXE, 14, 14);
         let sword = load(SWORD, 14, 14);
         let sword_up = load(SWORD_UP, 7, 14);
+        let swing = vec![sword_up.clone(), sword.clone(), rot90(&sword_up), rot90(&sword)];
+        let sword_tiers: Vec<Vec<Sprite>> = Tier::SWORDS.iter().map(|&t| swing.iter().map(|s| tint_sword(s, t)).collect()).collect();
+        let torch = load(TORCH, TILE, TILE);
+        let icons = ALL_ITEMS
+            .iter()
+            .map(|&it| {
+                if let Some(t) = it.sword() {
+                    return tint_sword(&sword, t);
+                }
+                match it {
+                    Item::Torch => torch.clone(),
+                    Item::Bow => Sprite::from_ascii(&ICON_BOW, &ICON_PAL),
+                    Item::Arrow => Sprite::from_ascii(&ICON_ARROW, &ICON_PAL),
+                    _ => match (it.tile(), it.armour()) {
+                        (Some(t), _) => tile_texture(t, 0),
+                        (None, Some((slot, tier))) => {
+                            let rows: &[&str] = if slot == crate::items::Slot::Head { &ICON_HELMET } else { &ICON_CHEST };
+                            let m = tier.metal();
+                            let mut pal = ICON_PAL.to_vec();
+                            pal.extend([('1', m[0]), ('2', m[1]), ('3', m[2]), ('4', m[3])]);
+                            Sprite::from_ascii(rows, &pal)
+                        }
+                        _ => placeholder(12, 12),
+                    },
+                }
+            })
+            .collect();
         Sprites {
             tiles,
             back_dirt,
@@ -199,14 +232,20 @@ impl Sprites {
             player_walk: load_strip(PLAYER_WALK, PLAYER_W, PLAYER_H, 6),
             player_jump: load(PLAYER_JUMP, PLAYER_W, PLAYER_H),
             player_fall: load(PLAYER_FALL, PLAYER_W, PLAYER_H),
-            sword_swing: vec![sword_up.clone(), sword.clone(), rot90(&sword_up), rot90(&sword)],
+            sword_swing: swing,
             sword,
             pickaxe_down: rot90(&pickaxe),
             pickaxe,
             app_icons: APP_ICONS.iter().map(|&a| load(a, 16, 16)).collect(),
             mob_crawler: load_strip(MOB_CRAWLER, CRAWLER_W, CRAWLER_H, 4),
             mob_bat: load_strip(MOB_BAT, BAT_W, BAT_H, 3),
+            icons,
+            sword_tiers,
         }
+    }
+
+    pub fn icon(&self, it: Item) -> &Sprite {
+        &self.icons[it as usize]
     }
 
     pub fn tile(&self, t: Tile, x: i32, y: i32) -> &Sprite {
@@ -347,8 +386,149 @@ fn tile_texture(t: Tile, v: i32) -> Sprite {
         }
         Tile::Torch => load(TORCH, TILE, TILE),
         Tile::Bedrock => speckled(rgb(40, 38, 48), rgb(58, 56, 68), rgb(26, 24, 32), 11, v),
+        Tile::Workbench => workbench(),
     }
 }
+
+/// A little carpenter's bench: plank top, two legs, a crossbar and a hammer on top.
+fn workbench() -> Sprite {
+    let mut s = Sprite::new(TILE, TILE);
+    let (hi, top, dark, leg) = (rgb(214, 164, 104), rgb(186, 136, 82), rgb(110, 74, 42), rgb(126, 86, 54));
+    let outline = rgb(24, 20, 36);
+    // Hammer lying on the top.
+    for x in 4..8 {
+        s.set(x, 4, rgb(138, 86, 52));
+    }
+    for (x, y) in [(8, 3), (9, 3), (8, 4), (9, 4), (10, 4)] {
+        s.set(x, y, rgb(138, 146, 180));
+    }
+    s.set(8, 3, rgb(212, 220, 240));
+    // Top: outline, highlight, plank, shadow.
+    for x in 0..TILE {
+        s.set(x, 5, outline);
+        s.set(x, 6, hi);
+        s.set(x, 7, top);
+        s.set(x, 8, top);
+        s.set(x, 9, dark);
+    }
+    s.set(0, 6, outline);
+    s.set(15, 6, outline);
+    s.set(0, 7, outline);
+    s.set(15, 7, outline);
+    s.set(0, 8, outline);
+    s.set(15, 8, outline);
+    for x in [5, 11] {
+        s.set(x, 7, dark);
+    }
+    // Legs and the crossbar.
+    for y in 10..TILE {
+        for (x, c) in [(1, outline), (2, leg), (3, dark), (4, outline), (11, outline), (12, leg), (13, dark), (14, outline)] {
+            s.set(x, y, c);
+        }
+    }
+    for x in 4..12 {
+        s.set(x, 12, dark);
+        s.set(x, 13, outline);
+    }
+    s.set(4, 12, dark);
+    s
+}
+
+/// Recolour the sword blade (greys + cyan edge in the PNG) to a tier's metal.
+fn tint_sword(s: &Sprite, t: Tier) -> Sprite {
+    let m = t.metal();
+    let map = [
+        (rgb(90, 240, 255), m[0]),
+        (rgb(212, 220, 240), m[1]),
+        (rgb(138, 146, 180), m[2]),
+        (rgb(74, 78, 104), m[3]),
+    ];
+    let mut out = s.clone();
+    for p in out.px.iter_mut() {
+        if p[3] > 0 {
+            if let Some(&(_, to)) = map.iter().find(|(from, _)| from[..3] == p[..3]) {
+                *p = to;
+            }
+        }
+    }
+    out
+}
+
+// --- item icons (original pixel art; 1-4 = the armour tier's metal, light to dark) ---
+const ICON_PAL: [(char, Rgba); 10] = [
+    ('o', rgb(20, 18, 28)),
+    ('w', rgb(196, 150, 96)),
+    ('W', rgb(130, 90, 54)),
+    ('g', rgb(90, 60, 40)),
+    ('G', rgb(60, 40, 28)),
+    ('s', rgb(232, 230, 220)),
+    ('m', rgb(212, 220, 240)),
+    ('M', rgb(138, 146, 180)),
+    ('f', rgb(236, 84, 70)),
+    ('F', rgb(170, 50, 50)),
+];
+
+pub const ICON_BOW: [&str; 14] = [
+    "......ooo.....",
+    ".....owWso....",
+    "....owWoso....",
+    "...owWooso....",
+    "..owWo.oso....",
+    "..owWo.oso....",
+    ".ogGo..oso....",
+    ".ogGo..oso....",
+    "..owWo.oso....",
+    "..owWo.oso....",
+    "...owWooso....",
+    "....owWoso....",
+    ".....owWso....",
+    "......ooo.....",
+];
+pub const ICON_ARROW: [&str; 14] = [
+    "...........oo.",
+    "..........oMmo",
+    ".........ommMo",
+    ".........omMo.",
+    "........owoo..",
+    ".......owo....",
+    "......owo.....",
+    ".....owo......",
+    "....owo.......",
+    ".ooowo........",
+    "offwo.........",
+    "ofFfo.........",
+    "oFfFo.........",
+    ".ooo..........",
+];
+pub const ICON_HELMET: [&str; 11] = [
+    "....oooooo....",
+    "...o222222o...",
+    "..o21122223o..",
+    ".o2112222233o.",
+    ".o2122222233o.",
+    "o222222222334o",
+    "o333333333344o",
+    "o34oooooooo44o",
+    "o34o......o44o",
+    "o34o......o4o.",
+    ".oo........o..",
+];
+pub const ICON_CHEST: [&str; 13] = [
+    ".ooo......ooo.",
+    "o222o....o333o",
+    "o2122oooo2334o",
+    "o21122222233o.",
+    ".o2122122333o.",
+    ".o2222122333o.",
+    ".o2222122333o.",
+    ".o2222122334o.",
+    ".o2222122334o.",
+    ".o3333333444o.",
+    ".o3333333444o.",
+    "..o33333344o..",
+    "...oooooooo...",
+];
+
 
 /// Grass overlay drawn on top of an exposed grass tile: top band + blades poking
 /// up into the tile above (negative y). Returns (dx, dy, colour) pixels.
