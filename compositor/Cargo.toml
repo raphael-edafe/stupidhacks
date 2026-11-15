@@ -6,3 +6,11 @@ edition.workspace = true
 [dependencies]
 shared = { path = "../shared" }
 game = { path = "../game", default-features = false }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+png = "0.18"
+
+[dependencies.smithay]
+version = "0.7"
+default-features = false
+features = ["backend_winit", "wayland_frontend", "desktop", "renderer_gl"]
