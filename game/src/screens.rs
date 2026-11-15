@@ -311,6 +311,7 @@ impl Screens {
                     id: s.id,
                     rect: Rect { x: vx + ox, y: vy + oy, w: w as i32, h: h as i32 },
                     hp: s.hp,
+                    zoom: 0.0,
                     glitch: s.flash > 0.5 || matches!(s.state, State::Dying { .. }),
                 }
             })

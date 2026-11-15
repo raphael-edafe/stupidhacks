@@ -36,7 +36,7 @@ impl FakeCompositor {
                         println!("[compositor] screen {id} destroyed -> would close app {}", APPS[app % APPS.len()].0);
                     }
                 }
-                GameEvent::ScreenDamaged { .. } => {}
+                _ => {}
             }
         }
         let mut ready = Vec::new();

@@ -54,6 +54,15 @@ pub enum Key {
     ToggleHud,
     /// T: place a torch.
     Torch,
+    /// E: interact (open the app chooser on an empty screen you're standing near).
+    Interact,
+    /// X: close the app on the nearby screen (the screen itself stays).
+    CloseApp,
+    /// Z: zoom into the nearby screen (window grows to fill the view and gets focus).
+    Zoom,
+    /// Esc: back out of menus / zoom. The compositor also sends this when it
+    /// takes keyboard focus away from an app.
+    Escape,
     Hotbar1,
     Hotbar2,
     Hotbar3,
@@ -95,8 +104,12 @@ impl InputState {
 #[derive(Clone, Copy, Debug)]
 pub struct ScreenInfo {
     pub id: ScreenId,
-    /// Interior rect (where the app window goes), camera and shake applied.
+    /// Where to draw the app window this frame, camera, shake and zoom applied.
+    /// When zooming, this grows towards the full view. The compositor scales the
+    /// window's buffer to fit and sends a configure once the size settles.
     pub rect: Rect,
+    /// 0.0 = in the world, 1.0 = fully zoomed in (fills the view).
+    pub zoom: f32,
     /// 0.0..=1.0
     pub hp: f32,
     /// Window should flicker/glitch this frame (being hit or dying).
@@ -105,13 +118,36 @@ pub struct ScreenInfo {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum GameEvent {
-    /// Frame finished building: compositor launches an app into it.
+    /// Frame finished building. The game now shows its app chooser; nothing to launch yet.
     ScreenBuilt { id: ScreenId },
+    /// Player picked an app for a screen: launch `APPS[app]` and bind its first window to `id`.
+    LaunchApp { id: ScreenId, app: usize },
+    /// Player closed the app by hand: send xdg_toplevel.close. The screen stays (empty).
+    CloseApp { id: ScreenId },
+    /// Give keyboard focus to the window on this screen (zoom-in finished starting).
+    FocusScreen { id: ScreenId },
     /// Screen took a hit; hp is what's left (0..1).
     ScreenDamaged { id: ScreenId, hp: f32 },
     /// Screen destroyed: compositor closes the app bound to it.
     ScreenDestroyed { id: ScreenId },
 }
+
+/// Apps offered in the in-game chooser. `command` is run by the compositor
+/// with WAYLAND_DISPLAY pointing at the nested compositor.
+#[derive(Clone, Copy, Debug)]
+pub struct AppEntry {
+    pub name: &'static str,
+    pub command: &'static [&'static str],
+}
+
+pub const APPS: &[AppEntry] = &[
+    AppEntry { name: "Terminal", command: &["foot"] },
+    AppEntry { name: "Files", command: &["nautilus", "--new-window"] },
+    AppEntry { name: "Text Editor", command: &["gnome-text-editor", "--new-window"] },
+    AppEntry { name: "Calculator", command: &["gnome-calculator"] },
+    AppEntry { name: "System Monitor", command: &["foot", "-e", "htop"] },
+    AppEntry { name: "Matrix", command: &["foot", "-e", "cmatrix"] },
+];
 
 pub trait GameApi {
     /// Advance the simulation. Called at a fixed 60 Hz (dt = 1/60).
