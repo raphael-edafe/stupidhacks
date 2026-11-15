@@ -20,12 +20,14 @@ pub enum Tile {
     Plank,
     Torch,
     Bedrock,
+    /// Crafting station (furniture: you walk through it). Press E near it to craft.
+    Workbench,
 }
 
 impl Tile {
     /// Blocks movement.
     pub fn solid(self) -> bool {
-        !matches!(self, Tile::Air | Tile::Log | Tile::Leaves | Tile::Torch)
+        !matches!(self, Tile::Air | Tile::Log | Tile::Leaves | Tile::Torch | Tile::Workbench)
     }
 
     /// Seconds to mine with bare hands. `None` = unbreakable.
@@ -33,6 +35,7 @@ impl Tile {
         match self {
             Tile::Air | Tile::Bedrock => None,
             Tile::Torch => Some(0.05),
+            Tile::Workbench => Some(0.3),
             Tile::Leaves => Some(0.12),
             Tile::Dirt | Tile::Grass => Some(0.25),
             Tile::Log | Tile::Plank => Some(0.35),
@@ -68,6 +71,7 @@ impl Tile {
             Tile::Plank => rgb(186, 136, 82),
             Tile::Torch => rgb(255, 200, 90),
             Tile::Bedrock => rgb(40, 38, 48),
+            Tile::Workbench => rgb(160, 112, 66),
         }
     }
 

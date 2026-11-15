@@ -3,6 +3,7 @@
 use crate::camera::Camera;
 use crate::gfx::{rgb, rgba, with_alpha, Canvas};
 use crate::input::Controls;
+use crate::items::{self, Item, Slot, Tier};
 use crate::particles::Particles;
 use crate::sprites::{Sprites, PLAYER_H, PLAYER_W, SWORD_GRIPS};
 use crate::world::{Tile, World, TILE};
@@ -24,8 +25,11 @@ const REACH: f32 = 6.0 * TILE as f32;
 /// Hold Q this long near a screen to smash it.
 pub const SMASH_TIME: f32 = 0.8;
 const SWING_TIME: f32 = 0.28;
+/// Seconds between bow shots.
+const BOW_COOLDOWN: f32 = 0.45;
 
-pub const HOTBAR: [Tile; 5] = [Tile::Dirt, Tile::Stone, Tile::Plank, Tile::Torch, Tile::Crystal];
+/// Hotbar slots (keys 1-6).
+pub const HOTBAR_SLOTS: usize = 6;
 
 pub struct Player {
     /// Top-left of the hitbox, world px.
@@ -40,8 +44,22 @@ pub struct Player {
     pub invuln: f32,
     pub swing: f32,
     pub god: bool,
-    pub inventory: [u32; 12],
+    /// Item counts, indexed by `Item as usize`.
+    pub inventory: [u32; items::COUNT],
+    /// The hotbar: any item kind per slot (blocks, tools, weapons).
+    pub hotbar: [Option<Item>; HOTBAR_SLOTS],
     pub selected: usize,
+    /// Seconds since the selection changed (the HUD shows the item name for a moment).
+    pub select_age: f32,
+    /// Worn armour.
+    pub helmet: Option<Tier>,
+    pub chest: Option<Tier>,
+    /// Length and sword tier of the current swing.
+    swing_len: f32,
+    swing_tier: Tier,
+    bow_cd: f32,
+    /// Arrows loosed this tick (tip x, tip y, vx, vy); the game moves them into `Projectiles`.
+    pub shots: Vec<(f32, f32, f32, f32)>,
     pub spawn: (f32, f32),
     anim: f32,
     /// Seconds since spawn (idle breathing).
@@ -68,24 +86,28 @@ impl Player {
         let tx = world.w / 2 - 4;
         let gy = world.ground_y(tx);
         let spawn = ((tx * TILE) as f32 + 3.0, (gy * TILE) as f32 - H - 1.0);
-        let mut inventory = [0u32; 12];
-        inventory[Tile::Dirt as usize] = 30;
-        inventory[Tile::Plank as usize] = 20;
-        inventory[Tile::Torch as usize] = 12;
-        Player {
+        let mut p = Player {
             x: spawn.0,
             y: spawn.1,
             vx: 0.0,
             vy: 0.0,
             on_ground: false,
             facing: 1.0,
-            hp: 10,
-            max_hp: 10,
+            hp: 20,
+            max_hp: 20,
             invuln: 0.0,
             swing: 0.0,
             god: false,
-            inventory,
+            inventory: [0; items::COUNT],
+            hotbar: [None; HOTBAR_SLOTS],
             selected: 0,
+            select_age: 10.0,
+            helmet: None,
+            chest: None,
+            swing_len: SWING_TIME,
+            swing_tier: Tier::Wood,
+            bow_cd: 0.0,
+            shots: Vec::new(),
             spawn,
             anim: 0.0,
             t: 0.0,
@@ -99,7 +121,93 @@ impl Player {
             smash_charge: 0.0,
             smash_lock: false,
             hover: None,
+        };
+        // Starting kit.
+        for (it, n) in [(Item::WoodSword, 1), (Item::Dirt, 30), (Item::Plank, 20), (Item::Stone, 10), (Item::Torch, 12), (Item::Workbench, 1)] {
+            p.give(it, n);
         }
+        p
+    }
+
+    pub fn count(&self, it: Item) -> u32 {
+        self.inventory[it as usize]
+    }
+
+    /// The item in the selected hotbar slot.
+    pub fn held(&self) -> Option<Item> {
+        self.hotbar[self.selected]
+    }
+
+    /// Add items. A kind you didn't have goes into the first free hotbar slot.
+    pub fn give(&mut self, it: Item, n: u32) {
+        self.inventory[it as usize] += n;
+        if it.hotbar() && !self.hotbar.contains(&Some(it)) {
+            if let Some(slot) = self.hotbar.iter_mut().find(|s| s.is_none()) {
+                *slot = Some(it);
+            }
+        }
+    }
+
+    /// Use up `n` of an item (free in god mode). False if there aren't enough.
+    /// A stack that runs out leaves the hotbar; tools and weapons never run out.
+    pub fn take(&mut self, it: Item, n: u32) -> bool {
+        if self.god {
+            return true;
+        }
+        if self.inventory[it as usize] < n {
+            return false;
+        }
+        self.inventory[it as usize] -= n;
+        if self.inventory[it as usize] == 0 && !it.is_tool() {
+            for s in self.hotbar.iter_mut().filter(|s| **s == Some(it)) {
+                *s = None;
+            }
+        }
+        true
+    }
+
+    /// The sword this player fights with: the held one, else the best one owned.
+    pub fn weapon(&self) -> Tier {
+        self.held()
+            .and_then(|it| it.sword())
+            .or_else(|| Tier::SWORDS.iter().rev().find(|t| self.count(t.sword_item()) > 0).copied())
+            .unwrap_or(Tier::Wood)
+    }
+
+    /// Damage the current swing does.
+    pub fn attack_damage(&self) -> i32 {
+        self.swing_tier.damage()
+    }
+
+    /// Total armour defence (each hit does `max(1, dmg - defense)`).
+    pub fn defense(&self) -> i32 {
+        self.helmet.map_or(0, |t| t.defense(Slot::Head)) + self.chest.map_or(0, |t| t.defense(Slot::Body))
+    }
+
+    /// Wear a piece of armour if it's better than what's in that slot.
+    pub fn equip_if_better(&mut self, it: Item) {
+        if let Some((slot, tier)) = it.armour() {
+            let cur = match slot {
+                Slot::Head => &mut self.helmet,
+                Slot::Body => &mut self.chest,
+            };
+            if cur.is_none_or(|c| tier > c) {
+                *cur = Some(tier);
+            }
+        }
+    }
+
+    /// Put an owned item into hotbar slot `slot` (moving it from any other slot).
+    pub fn assign(&mut self, slot: usize, it: Item) {
+        if slot >= HOTBAR_SLOTS || self.count(it) == 0 || !it.hotbar() {
+            return;
+        }
+        for s in self.hotbar.iter_mut().filter(|s| **s == Some(it)) {
+            *s = None;
+        }
+        self.hotbar[slot] = Some(it);
+        self.selected = slot;
+        self.select_age = 0.0;
     }
 
     pub fn center(&self) -> (f32, f32) {
@@ -111,11 +219,14 @@ impl Player {
         self.t += dt;
         self.invuln = (self.invuln - dt).max(0.0);
         self.swing = (self.swing - dt).max(0.0);
+        self.bow_cd = (self.bow_cd - dt).max(0.0);
         self.place_cooldown = (self.place_cooldown - dt).max(0.0);
 
-        for (i, k) in [Key::Hotbar1, Key::Hotbar2, Key::Hotbar3, Key::Hotbar4, Key::Hotbar5].iter().enumerate() {
+        self.select_age += dt;
+        for (i, k) in [Key::Hotbar1, Key::Hotbar2, Key::Hotbar3, Key::Hotbar4, Key::Hotbar5, Key::Hotbar6].iter().enumerate() {
             if ctl.pressed(*k) {
                 self.selected = i;
+                self.select_age = 0.0;
             }
         }
 
@@ -194,7 +305,18 @@ impl Player {
             if (wx - cx).abs() > 2.0 {
                 self.facing = (wx - cx).signum();
             }
-            if in_reach && target.hardness().is_some() {
+            if self.held() == Some(Item::Bow) {
+                // The bow shoots wherever you click (no mining while it's out).
+                self.mining = None;
+                if self.bow_cd <= 0.0 && self.take(Item::Arrow, 1) {
+                    let (sx, sy) = self.shoulder();
+                    let (dx, dy) = (wx - sx, wy - sy);
+                    let d = dx.hypot(dy).max(0.001);
+                    let speed = crate::projectiles::ARROW_SPEED;
+                    self.shots.push((sx + dx / d * 8.0, sy + dy / d * 8.0, dx / d * speed, dy / d * speed));
+                    self.bow_cd = BOW_COOLDOWN;
+                }
+            } else if in_reach && target.hardness().is_some() {
                 let progress = match self.mining {
                     Some((mx_, my_, p)) if mx_ == tx && my_ == ty => p,
                     _ => 0.0,
@@ -204,8 +326,9 @@ impl Player {
                 let p = progress + dt * speed / hardness;
                 if p >= 1.0 {
                     world.set(tx, ty, Tile::Air);
-                    let d = target.drop();
-                    self.inventory[d as usize] += 1;
+                    if let Some(it) = Item::from_tile(target) {
+                        self.give(it, 1);
+                    }
                     let (px, py) = ((tx * TILE + 8) as f32, (ty * TILE + 8) as f32);
                     fx.debris(px, py, target.color(), 14);
                     if target == Tile::Crystal {
@@ -222,20 +345,26 @@ impl Player {
             } else {
                 self.mining = None;
                 if self.swing <= 0.0 {
-                    self.swing = SWING_TIME;
+                    self.swing_tier = self.weapon();
+                    self.swing_len = self.swing_tier.swing_time();
+                    self.swing = self.swing_len;
                 }
             }
         } else {
             self.mining = None;
         }
 
-        let place_tile = if ctl.pressed(Key::Torch) { Some(Tile::Torch) } else if ctl.rmb() { Some(HOTBAR[self.selected]) } else { None };
-        if let Some(t) = place_tile {
+        // T always places a torch; right click places the held item if it's a block.
+        let place = if ctl.pressed(Key::Torch) {
+            Some(Item::Torch)
+        } else if ctl.rmb() {
+            self.held().filter(|it| it.tile().is_some())
+        } else {
+            None
+        };
+        if let Some((it, t)) = place.and_then(|it| it.tile().map(|t| (it, t))) {
             if self.place_cooldown <= 0.0 && in_reach && target == Tile::Air && self.can_place(tx, ty, world, t) {
-                if self.god || self.inventory[t as usize] > 0 {
-                    if !self.god {
-                        self.inventory[t as usize] -= 1;
-                    }
+                if self.take(it, 1) {
                     world.set(tx, ty, t);
                     fx.debris((tx * TILE + 8) as f32, (ty * TILE + 8) as f32, t.color(), 4);
                     self.place_cooldown = 0.12;
@@ -391,9 +520,9 @@ impl Player {
 
     /// Hitbox of the current sword swing, if active: (x, y, w, h) in world px.
     pub fn attack_box(&self) -> Option<(f32, f32, f32, f32)> {
-        if self.swing > SWING_TIME * 0.25 {
+        if self.swing > self.swing_len * 0.25 {
             let (cx, sy) = self.shoulder();
-            let w = 32.0;
+            let w = self.swing_tier.reach();
             let x = if self.facing > 0.0 { cx - 2.0 } else { cx + 2.0 - w };
             Some((x, sy - 24.0, w, 40.0))
         } else {
@@ -406,7 +535,7 @@ impl Player {
         if self.invuln > 0.0 || self.god {
             return false;
         }
-        self.hp -= dmg;
+        self.hp -= (dmg - self.defense()).max(1);
         self.invuln = 0.8;
         let dir = if self.center().0 < from_x { -1.0 } else { 1.0 };
         self.vx = dir * 200.0;
@@ -477,7 +606,19 @@ impl Player {
             self.draw_slash(c, cam, sprites, k, true);
         }
 
-        c.sprite_shaded(spr, vx, vy, flip, k);
+        if self.helmet.is_some() || self.chest.is_some() {
+            c.sprite_shaded(&armoured(spr, self.helmet, self.chest), vx, vy, flip, k);
+        } else {
+            c.sprite_shaded(spr, vx, vy, flip, k);
+        }
+
+        // The bow in the front hand while it's held.
+        if self.held() == Some(Item::Bow) && self.mining.is_none() {
+            let bow = sprites.icon(Item::Bow);
+            let (hx, hy) = (if flip { spr.w - 1 - HAND.0 } else { HAND.0 }, HAND.1);
+            // The icon's string faces right; mirror it so the bow points where we face.
+            c.sprite_shaded(bow, vx + hx - bow.w / 2 + if flip { -3 } else { 3 }, vy + hy - bow.h / 2 - 2, !flip, k);
+        }
 
         // Pickaxe in the front hand while mining: raised, then struck, a few times a second.
         if let Some((_, _, p)) = self.mining {
@@ -496,7 +637,7 @@ impl Player {
     /// Two passes: `behind` (under the body) draws the sword only while it's raised behind
     /// the head; the other pass draws the trail and the sword once it comes over.
     fn draw_slash(&self, c: &mut Canvas, cam: &Camera, sprites: &Sprites, k: f32, behind: bool) {
-        let t = 1.0 - self.swing / SWING_TIME; // 0 -> 1
+        let t = 1.0 - self.swing / self.swing_len; // 0 -> 1
         let (sx, sy) = self.shoulder();
         let (vx, vy) = cam.to_view(sx, sy);
         let f = self.facing;
@@ -513,7 +654,8 @@ impl Player {
         }
         // Sword sprite nearest the arc angle, grip in the hand at arm's length.
         let i = (((deg + 90.0) / 45.0).round().clamp(0.0, 3.0)) as usize;
-        let (Some(s), Some(&(px, py))) = (sprites.sword_swing.get(i), SWORD_GRIPS.get(i)) else { return };
+        let swing = sprites.sword_tiers.get(self.swing_tier as usize).unwrap_or(&sprites.sword_swing);
+        let (Some(s), Some(&(px, py))) = (swing.get(i), SWORD_GRIPS.get(i)) else { return };
         let (gx, gy) = (vx + (head.cos() * 6.0 * f).round() as i32, vy + (head.sin() * 6.0).round() as i32);
         let x = if f < 0.0 { gx - (s.w - 1 - px) } else { gx - px };
         c.sprite_shaded(s, x, gy - py, f < 0.0, k.max(0.6));
@@ -533,7 +675,8 @@ impl Player {
             for r in 9..24 {
                 let x = vx + (a.cos() * r as f32 * f) as i32;
                 let y = vy + (a.sin() * r as f32) as i32;
-                let col = if r > 20 { rgba(255, 255, 255, alpha) } else { rgba(150, 236, 255, alpha / 2) };
+                let tc = self.swing_tier.trail();
+                let col = if r > 20 { rgba(255, 255, 255, alpha) } else { rgba(tc[0], tc[1], tc[2], alpha / 2) };
                 c.blend(x, y, col);
             }
         }
@@ -588,4 +731,103 @@ impl Player {
             c.fill_rect(vx, vy, TILE, TILE, with_alpha(rgb(255, 255, 255), (p * 40.0) as u8));
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::world::World;
+
+    #[test]
+    fn starting_kit_fills_the_hotbar() {
+        let p = Player::new(&World::generate(1));
+        assert_eq!(p.hotbar[0], Some(Item::WoodSword));
+        assert!(p.hotbar.iter().all(|s| s.is_some()));
+        assert_eq!(p.count(Item::Dirt), 30);
+    }
+
+    #[test]
+    fn stacks_leave_the_hotbar_when_used_up_and_come_back() {
+        let mut p = Player::new(&World::generate(1));
+        let slot = p.hotbar.iter().position(|s| *s == Some(Item::Workbench)).unwrap();
+        assert!(p.take(Item::Workbench, 1));
+        assert_eq!(p.hotbar[slot], None);
+        assert!(!p.take(Item::Workbench, 1), "can't use what you don't have");
+        p.give(Item::Copper, 3);
+        assert_eq!(p.hotbar[slot], Some(Item::Copper), "a new kind fills the free slot");
+        p.take(Item::WoodSword, 1);
+        assert_eq!(p.hotbar[0], Some(Item::WoodSword), "weapons never leave the hotbar");
+    }
+
+    #[test]
+    fn armour_soaks_damage_but_every_hit_stings() {
+        let mut p = Player::new(&World::generate(1));
+        let mut fx = Particles::new();
+        p.hurt(4, 0.0, &mut fx);
+        assert_eq!(p.hp, 16);
+        p.invuln = 0.0;
+        p.helmet = Some(Tier::Crystal);
+        p.chest = Some(Tier::Crystal);
+        assert_eq!(p.defense(), 5);
+        p.hurt(4, 0.0, &mut fx);
+        assert_eq!(p.hp, 15, "a hit always does at least 1");
+    }
+
+    #[test]
+    fn fights_with_the_held_or_best_sword() {
+        let mut p = Player::new(&World::generate(1));
+        assert_eq!(p.weapon(), Tier::Wood);
+        p.give(Item::IronSword, 1);
+        p.selected = p.hotbar.iter().position(|s| *s == Some(Item::Dirt)).unwrap();
+        assert_eq!(p.weapon(), Tier::Iron, "holding a block: best sword owned");
+        p.assign(0, Item::WoodSword);
+        assert_eq!(p.weapon(), Tier::Wood, "holding a sword: that one");
+    }
+
+    #[test]
+    fn assign_moves_an_item_between_slots() {
+        let mut p = Player::new(&World::generate(1));
+        p.assign(5, Item::WoodSword);
+        assert_eq!(p.hotbar[5], Some(Item::WoodSword));
+        assert_eq!(p.hotbar[0], None);
+        assert_eq!(p.selected, 5);
+    }
+}
+
+/// The player frame with armour: the hard hat becomes a helmet and the jacket a
+/// chestplate (palette swap, so it follows every animation frame).
+fn armoured(spr: &crate::gfx::Sprite, helmet: Option<Tier>, chest: Option<Tier>) -> crate::gfx::Sprite {
+    use crate::gfx::Rgba;
+    // Hard hat (only in the top rows: the same yellows appear on the belt and gloves).
+    const HAT: [[u8; 3]; 4] = [[255, 240, 176], [255, 210, 94], [232, 150, 44], [168, 90, 28]];
+    // Jacket and vest: lightest to darkest teal, then the reflective stripe.
+    const JACKET: [[u8; 3]; 6] = [[108, 214, 196], [47, 163, 158], [31, 106, 114], [22, 63, 76], [246, 226, 122], [200, 168, 62]];
+    const HAT_ROWS: i32 = 8;
+    let mut out = spr.clone();
+    let hm = helmet.map(|t| t.metal());
+    let cm = chest.map(|t| t.metal());
+    for y in 0..out.h {
+        for x in 0..out.w {
+            let p = out.get(x, y);
+            if p[3] == 0 {
+                continue;
+            }
+            let rgb3 = [p[0], p[1], p[2]];
+            let mut to: Option<Rgba> = None;
+            if let (Some(m), true) = (hm, y < HAT_ROWS) {
+                if let Some(i) = HAT.iter().position(|c| *c == rgb3) {
+                    to = Some(m[[0, 0, 1, 3][i]]);
+                }
+            }
+            if let Some(m) = cm {
+                if let Some(i) = JACKET.iter().position(|c| *c == rgb3) {
+                    to = Some(m[[0, 1, 2, 3, 0, 2][i]]);
+                }
+            }
+            if let Some(c) = to {
+                out.set(x, y, c);
+            }
+        }
+    }
+    out
 }

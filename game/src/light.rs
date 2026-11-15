@@ -19,6 +19,12 @@ const FALL_AIR: f32 = 0.82;
 const FALL_SOLID: f32 = 0.76;
 /// Darkest it gets (deep caves): keeps silhouettes barely readable.
 const MIN_LIGHT: f32 = 0.05;
+/// Underground ambient (from B2's lighting pass): full sky light for this many
+/// tiles below the original surface, then fading per tile down to a floor, so
+/// the dirt and stone layers stay readable and darken with depth.
+const DEPTH_FULL: i32 = 3;
+const DEPTH_FADE: f32 = 0.035;
+const DEPTH_FLOOR: f32 = 0.32;
 
 pub struct Light {
     gx0: i32,
@@ -86,6 +92,25 @@ impl Light {
                 let wy = gy0 + gy as i32;
                 if wy <= first_solid {
                     self.cells[gy * gw + gx] = self.sky;
+                }
+            }
+        }
+
+        // Underground ambient floor (scaled by the sky colour, so nights are darker).
+        for gy in 0..gh {
+            for gx in 0..gw {
+                let (wx, wy) = (gx0 + gx as i32, gy0 + gy as i32);
+                if wx < 0 || wx >= world.w {
+                    continue;
+                }
+                let depth = wy - world.surface[wx as usize];
+                if depth <= 0 {
+                    continue;
+                }
+                let k = if depth <= DEPTH_FULL { 1.0 } else { (1.0 - DEPTH_FADE * (depth - DEPTH_FULL) as f32).max(DEPTH_FLOOR) };
+                let cell = &mut self.cells[gy * gw + gx];
+                for c in 0..3 {
+                    cell[c] = cell[c].max(self.sky[c] * k);
                 }
             }
         }

@@ -503,9 +503,12 @@ fn headless(seed: u64, dir: &str) {
         (27.6 + S, "19_dying"),
         (28.33 + S, "20_explosion"),
         (30.5 + S, "21_after"),
+        (33.05 + S, "22_crafting"),
+        (34.6 + S, "23_torchlight_armour"),
+        (35.75 + S, "24_bow"),
     ];
     let mut next_shot = 0;
-    let end = 31.0 + S;
+    let end = 36.0 + S;
 
     let tile_to_mouse = |g: &Game, x: i32, y: i32| ((x * 16 + 8) as f32 - g.cam.x, (y * 16 + 8) as f32 - g.cam.y);
     let during = |a: f32, b: f32, t: f32| (a..b).contains(&t);
@@ -571,9 +574,42 @@ fn headless(seed: u64, dir: &str) {
         }
         // Close with X, reopen the launcher with E, pick favourite 6 (System Monitor).
         input.set(Key::CloseApp, during(14.6 + S, 14.65 + S, t));
-        input.set(Key::Interact, during(15.6 + S, 15.65 + S, t));
-        input.set(Key::Hotbar6, during(16.3 + S, 16.35 + S, t));
         input.set(Key::Night, during(17.5 + S, 17.6 + S, t));
+        // After the siege: god mode, place the workbench, craft copper armour, a bow
+        // and arrows, light the night with torches, then shoot the bow.
+        input.set(Key::God, during(31.0 + S, 31.05 + S, t));
+        input.set(Key::Hotbar6, during(16.3 + S, 16.35 + S, t) || during(31.2 + S, 31.25 + S, t) || during(35.0 + S, 35.05 + S, t));
+        let ptx = (pcx / 16.0) as i32;
+        let bench = (ptx - 2, g.world.ground_y(ptx - 2) - 1);
+        input.rmb = during(31.4 + S, 31.5 + S, t);
+        if during(31.3 + S, 31.6 + S, t) {
+            (input.mouse_x, input.mouse_y) = tile_to_mouse(&g, bench.0, bench.1);
+        }
+        input.set(Key::Interact, during(15.6 + S, 15.65 + S, t) || during(31.8 + S, 31.85 + S, t));
+        let view = (g.cam.vw as i32, g.cam.vh as i32);
+        for (at, item) in [(32.2 + S, game::items::Item::CopperHelmet), (32.5 + S, game::items::Item::CopperChest), (32.8 + S, game::items::Item::Bow), (33.0 + S, game::items::Item::Arrow)] {
+            let row = game::items::RECIPES.iter().position(|r| r.out == item).unwrap_or(0);
+            if during(at - 0.15, at + 0.05, t) {
+                (input.mouse_x, input.mouse_y) = game::crafting::Crafting::row_center(row, view);
+                input.lmb = during(at, at + 0.02, t);
+            }
+        }
+        input.set(Key::Escape, during(33.4 + S, 33.45 + S, t));
+        // Torches: T at a tile to the left and one at the player's feet.
+        let mut torch = false;
+        for (at, dx) in [(33.8 + S, -5), (34.0 + S, 1)] {
+            if during(at - 0.05, at + 0.05, t) {
+                let tx = ptx + dx;
+                (input.mouse_x, input.mouse_y) = tile_to_mouse(&g, tx, g.world.ground_y(tx) - 1);
+            }
+            torch |= during(at, at + 0.02, t);
+        }
+        input.set(Key::Torch, torch);
+        if during(35.2 + S, 36.0 + S, t) {
+            let aim = g.mobs.list.first().map(|z| z.center()).unwrap_or((pcx + 160.0, pcy - 70.0));
+            (input.mouse_x, input.mouse_y) = (aim.0 - g.cam.x, aim.1 - g.cam.y);
+            input.lmb = true;
+        }
         input.game_focused = fake.focus.is_none();
         // Mobs are stubbed: simulate attacks from the left side at night.
         if let Some(id) = screen_id {
