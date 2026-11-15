@@ -1,17 +1,24 @@
-//! In-world UI widgets: app chooser panel, key-cap prompts, app icons, CRT
-//! power effects, easing. Owner: person B1. Everything draws in view px.
+//! In-world UI widgets: the app launcher panel (search field + scrolling list
+//! over the installed-app catalog), key-cap prompts, app icons, CRT power
+//! effects, easing. Owner: person B1. Everything draws in view px.
 
 use crate::gfx::{lerp_color, rgb, rgba, shade, text_width, Canvas, Rgba};
-use shared::APPS;
+use shared::{AppInfo, APPS};
 
-pub const PANEL_W: i32 = 152;
+pub const PANEL_W: i32 = 176;
 pub const TITLE_H: i32 = 20;
-pub const ROW_H: i32 = 20;
+/// Search field, relative to the panel top.
+pub const SEARCH_TOP: i32 = TITLE_H + 5;
+pub const SEARCH_H: i32 = 13;
+pub const ROWS_TOP: i32 = SEARCH_TOP + SEARCH_H + 4;
+pub const ROW_H: i32 = 18;
+pub const VISIBLE_ROWS: usize = 6;
 pub const FOOTER_H: i32 = 14;
-pub const ROWS_TOP: i32 = TITLE_H + 5;
+/// Longest search query (chars).
+pub const MAX_QUERY: usize = 24;
 
 pub fn panel_h() -> i32 {
-    ROWS_TOP + APPS.len() as i32 * ROW_H + 3 + FOOTER_H
+    ROWS_TOP + VISIBLE_ROWS as i32 * ROW_H + 3 + FOOTER_H
 }
 
 pub fn clamp01(t: f32) -> f32 {
@@ -43,48 +50,138 @@ pub fn fade(c: Rgba, a: f32) -> Rgba {
     [c[0], c[1], c[2], (c[3] as f32 * clamp01(a)) as u8]
 }
 
+// ---------------------------------------------------------------------------
+// App catalog helpers
+// ---------------------------------------------------------------------------
+
+/// Catalog ids drawn with the pxl icons, in `shared::APPS` order (which is the
+/// order of `Sprites::app_icons`): Terminal, Files, Text Editor, Calculator,
+/// System Monitor, Matrix.
+const PXL_IDS: [&[&str]; 6] = [
+    &["foot", "desktop-siege.terminal"],
+    &["org.gnome.Nautilus"],
+    &["org.gnome.TextEditor"],
+    &["org.gnome.Calculator"],
+    &["desktop-siege.system-monitor"],
+    &["cmatrix"],
+];
+
+/// The catalog used until the compositor supplies one (and in tests): the
+/// static `shared::APPS`, all favourites, in order.
+pub fn fallback_catalog() -> Vec<AppInfo> {
+    APPS.iter()
+        .enumerate()
+        .map(|(i, a)| AppInfo {
+            id: PXL_IDS.get(i).map(|ids| ids[0].to_string()).unwrap_or_else(|| format!("app-{i}")),
+            name: a.name.to_string(),
+            icon: None,
+            favourite: Some(i as u8),
+        })
+        .collect()
+}
+
+fn pxl_index(app: &AppInfo) -> Option<usize> {
+    PXL_IDS.iter().position(|ids| ids.contains(&app.id.as_str()))
+}
+
 /// Display name in pixel-font caps.
-pub fn app_label(index: usize) -> String {
-    APPS.get(index).map(|a| a.name.to_ascii_uppercase()).unwrap_or_else(|| "APP".to_string())
+pub fn app_label(apps: &[AppInfo], index: usize) -> String {
+    apps.get(index).map(|a| a.name.to_uppercase()).unwrap_or_else(|| "APP".to_string())
 }
 
-/// Placeholder app icon: a 16x16 bevelled coloured tile with a letter.
-/// (Pixel-art icons from the sprite pass will replace the body of this function.)
-pub fn draw_app_icon(c: &mut Canvas, index: usize, x: i32, y: i32) {
-    draw_app_icon_a(c, index, x, y, 1.0);
+/// Match quality of `query` (lowercase) against `name` (lowercase):
+/// 0 = name prefix, 1 = start of a word, 2 = substring.
+fn rank(name: &str, query: &str) -> Option<u8> {
+    if name.starts_with(query) {
+        return Some(0);
+    }
+    let mut prev_alnum = true;
+    for (i, ch) in name.char_indices() {
+        if !prev_alnum && ch.is_alphanumeric() && name[i..].starts_with(query) {
+            return Some(1);
+        }
+        prev_alnum = ch.is_alphanumeric();
+    }
+    name.contains(query).then_some(2)
 }
 
-/// pxl-made app icons (set once from `Sprites` at startup).
+/// Launcher results (catalog indices). Empty query: favourites in order, then
+/// everything else alphabetically. Otherwise ranked prefix > word start >
+/// substring (case-insensitive), ties by name.
+pub fn search(apps: &[AppInfo], query: &str) -> Vec<usize> {
+    let q = query.trim().to_lowercase();
+    let mut v: Vec<(u8, u8, String, usize)> = apps
+        .iter()
+        .enumerate()
+        .filter_map(|(i, a)| {
+            let name = a.name.to_lowercase();
+            if q.is_empty() {
+                Some((a.favourite.is_none() as u8, a.favourite.unwrap_or(0), name, i))
+            } else {
+                rank(&name, &q).map(|r| (r, 0, name, i))
+            }
+        })
+        .collect();
+    v.sort();
+    v.into_iter().map(|t| t.3).collect()
+}
+
+// ---------------------------------------------------------------------------
+// Icons
+// ---------------------------------------------------------------------------
+
+/// App icon (16x16) at full opacity.
+pub fn draw_app_icon(c: &mut Canvas, apps: &[AppInfo], index: usize, x: i32, y: i32) {
+    draw_app_icon_a(c, apps, index, x, y, 1.0);
+}
+
+/// pxl-made app icons (set once from `Sprites` at startup), in `shared::APPS` order.
 static ICONS: std::sync::OnceLock<Vec<crate::gfx::Sprite>> = std::sync::OnceLock::new();
 
 pub fn set_icons(icons: Vec<crate::gfx::Sprite>) {
     let _ = ICONS.set(icons);
 }
 
-pub fn draw_app_icon_a(c: &mut Canvas, index: usize, x: i32, y: i32, a: f32) {
-    if let Some(icon) = ICONS.get().and_then(|v| v.get(index)) {
+/// App icon: the pxl icon for the favourites that have one, else the
+/// catalog's own (system theme) icon, else a bevelled letter tile.
+pub fn draw_app_icon_a(c: &mut Canvas, apps: &[AppInfo], index: usize, x: i32, y: i32, a: f32) {
+    let a = clamp01(a);
+    let app = apps.get(index);
+    let pxl = app.and_then(pxl_index);
+    if let Some(icon) = pxl.and_then(|p| ICONS.get().and_then(|v| v.get(p))) {
         for sy in 0..icon.h {
             for sx in 0..icon.w {
                 let p = icon.get(sx, sy);
                 if p[3] > 0 {
-                    c.blend(x + sx, y + sy, [p[0], p[1], p[2], (p[3] as f32 * a.clamp(0.0, 1.0)) as u8]);
+                    c.blend(x + sx, y + sy, [p[0], p[1], p[2], (p[3] as f32 * a) as u8]);
                 }
             }
         }
         return;
     }
-    const STYLE: [(Rgba, char); 6] = [
-        (rgb(34, 150, 96), 'T'),
-        (rgb(222, 160, 56), 'F'),
-        (rgb(82, 132, 232), 'E'),
-        (rgb(150, 98, 222), 'C'),
-        (rgb(228, 86, 86), 'S'),
-        (rgb(30, 190, 70), 'M'),
+    if let Some(px) = app.and_then(|ap| ap.icon.as_deref()).filter(|b| b.len() >= 16 * 16 * 4) {
+        for (i, p) in px.chunks_exact(4).take(256).enumerate() {
+            if p[3] > 0 {
+                c.blend(x + (i % 16) as i32, y + (i / 16) as i32, [p[0], p[1], p[2], (p[3] as f32 * a) as u8]);
+            }
+        }
+        return;
+    }
+    const STYLE: [Rgba; 6] = [rgb(34, 150, 96), rgb(222, 160, 56), rgb(82, 132, 232), rgb(150, 98, 222), rgb(228, 86, 86), rgb(30, 190, 70)];
+    const PALETTE: [Rgba; 8] = [
+        rgb(52, 140, 200),
+        rgb(214, 120, 60),
+        rgb(70, 160, 110),
+        rgb(170, 90, 200),
+        rgb(200, 70, 100),
+        rgb(60, 170, 170),
+        rgb(190, 160, 50),
+        rgb(110, 110, 210),
     ];
-    let (body, letter) = STYLE.get(index).copied().unwrap_or((
-        rgb(120, 120, 140),
-        APPS.get(index).and_then(|ap| ap.name.chars().next()).unwrap_or('?'),
-    ));
+    let name = app.map(|ap| ap.name.as_str()).unwrap_or("?");
+    let hash = name.bytes().fold(2166136261u32, |h, b| (h ^ b as u32).wrapping_mul(16777619));
+    let body = pxl.and_then(|p| STYLE.get(p).copied()).unwrap_or(PALETTE[hash as usize % PALETTE.len()]);
+    let letter = name.chars().find(|ch| ch.is_ascii_alphanumeric()).unwrap_or('?').to_ascii_uppercase();
     let outline = rgb(14, 16, 24);
     c.fill_rect(x + 1, y, 14, 16, fade(outline, a));
     c.fill_rect(x, y + 1, 16, 14, fade(outline, a));
@@ -99,6 +196,18 @@ pub fn draw_app_icon_a(c: &mut Canvas, index: usize, x: i32, y: i32, a: f32) {
     let s = letter.encode_utf8(&mut buf);
     c.text(x + 6, y + 4, s, 2, fade(rgba(10, 12, 20, 150), a));
     c.text(x + 5, y + 3, s, 2, fade(rgb(250, 252, 255), a));
+}
+
+/// `s` cut down (with "..") to fit `max_w` pixels at scale 1.
+pub fn ellipsize(s: &str, max_w: i32) -> String {
+    if text_width(s, 1) <= max_w {
+        return s.to_string();
+    }
+    let mut out: String = s.to_string();
+    while !out.is_empty() && text_width(&format!("{}..", out.trim_end()), 1) > max_w {
+        out.pop();
+    }
+    format!("{}..", out.trim_end())
 }
 
 /// Keyboard key cap with a label (e.g. "E", "ESC"). Returns its width.
@@ -151,11 +260,29 @@ pub fn draw_prompt(c: &mut Canvas, cx: i32, y: i32, items: &[(&str, &str)], acce
     }
 }
 
-/// The "OPEN APP" chooser panel. `rect` is the final panel rect; `scale`
+/// What the launcher panel shows this frame.
+pub struct LauncherView<'a> {
+    pub apps: &'a [AppInfo],
+    /// Catalog indices, in display order (see `search`).
+    pub results: &'a [usize],
+    pub query: &'a str,
+    /// Highlighted position in `results`.
+    pub hover: usize,
+    /// First visible position in `results`.
+    pub scroll: usize,
+}
+
+impl LauncherView<'_> {
+    fn has_bar(&self) -> bool {
+        self.results.len() > VISIBLE_ROWS
+    }
+}
+
+/// The "OPEN APP" launcher panel. `rect` is the final panel rect; `scale`
 /// animates the frame size around its centre; `alpha` fades everything;
-/// `content` fades the rows in after the frame pops.
+/// `content` fades the search field and rows in after the frame pops.
 #[allow(clippy::too_many_arguments)]
-pub fn draw_chooser(c: &mut Canvas, rect: (i32, i32, i32, i32), scale: f32, alpha: f32, content: f32, hover: Option<usize>, time: f32) {
+pub fn draw_chooser(c: &mut Canvas, rect: (i32, i32, i32, i32), scale: f32, alpha: f32, content: f32, view: &LauncherView, time: f32) {
     let (x, y, w, h) = rect;
     let (cx, cy) = (x + w / 2, y + h / 2);
     let sw = ((w as f32 * scale) as i32).max(8);
@@ -202,22 +329,26 @@ pub fn draw_chooser(c: &mut Canvas, rect: (i32, i32, i32, i32), scale: f32, alph
         let tw = text_width(title, 2);
         c.text(cx - tw / 2 + 1, fy + 5 + 1, title, 2, fade(rgba(8, 14, 30, 200), ca));
         c.text(cx - tw / 2, fy + 5, title, 2, fade(rgb(250, 252, 255), ca));
+        draw_search_field(c, rect, view, ca, time);
     }
 
     // Rows.
     let ra = a * content;
     if ra > 0.0 {
-        for i in 0..APPS.len() {
-            let (rx, ry, rw, rh) = row_rect(rect, i);
+        let bar = view.has_bar();
+        for vis in 0..VISIBLE_ROWS {
+            let pos = view.scroll + vis;
+            let Some(&idx) = view.results.get(pos) else { break };
+            let (rx, ry, rw, rh) = row_rect(rect, vis, bar);
             // Staggered slide-in.
-            let k = clamp01(content * 1.6 - i as f32 * 0.12);
+            let k = clamp01(content * 1.6 - vis as f32 * 0.12);
             if k <= 0.0 {
                 continue;
             }
             let off = ((1.0 - ease_out_cubic(k)) * 10.0) as i32;
             let rx = rx + off;
             let a2 = ra * k;
-            let hovered = hover == Some(i);
+            let hovered = view.hover == pos;
             if hovered {
                 let pulse = 0.75 + 0.25 * (time * 6.0).sin();
                 c.fill_rect(rx, ry, rw, rh, fade(rgba(110, 228, 255, 46), a2 * pulse));
@@ -225,22 +356,40 @@ pub fn draw_chooser(c: &mut Canvas, rect: (i32, i32, i32, i32), scale: f32, alph
                 c.fill_rect(rx, ry + rh - 1, rw, 1, fade(accent, a2));
                 c.fill_rect(rx, ry + 1, 1, rh - 2, fade(accent, a2));
                 c.fill_rect(rx + rw - 1, ry + 1, 1, rh - 2, fade(accent, a2));
-            } else if i % 2 == 1 {
+            } else if pos % 2 == 1 {
                 c.fill_rect(rx, ry, rw, rh, fade(rgba(255, 255, 255, 8), a2));
             }
-            let key = (i + 1).to_string();
-            draw_keycap(c, rx + 3, ry + (rh - 11) / 2, &key, a2);
+            // Number keys pick the favourites while the search is empty.
+            let fav = view.apps.get(idx).and_then(|ap| ap.favourite).filter(|&f| (f as usize) < 6 && view.query.is_empty());
+            if let Some(f) = fav {
+                draw_keycap(c, rx + 3, ry + (rh - 11) / 2, &(f + 1).to_string(), a2);
+            }
             let bob = if hovered { ((time * 8.0).sin() * 1.0).round() as i32 } else { 0 };
-            draw_app_icon_a(c, i, rx + 17, ry + (rh - 16) / 2 + bob, a2);
-            let name = app_label(i);
+            draw_app_icon_a(c, view.apps, idx, rx + 16, ry + (rh - 16) / 2 + bob, a2);
+            let name = ellipsize(&app_label(view.apps, idx), rw - 36 - 10);
             let col = if hovered { rgb(255, 255, 255) } else { rgb(178, 190, 214) };
-            c.text_shadow(rx + 38, ry + (rh - 5) / 2, &name, 1, fade(col, a2));
+            c.text_shadow(rx + 36, ry + (rh - 5) / 2, &name, 1, fade(col, a2));
             if hovered {
                 let nudge = ((time * 7.0).sin() * 1.5) as i32;
-                c.text(rx + rw - 9 + nudge, ry + (rh - 5) / 2, ">", 1, fade(accent, a2));
+                c.text(rx + rw - 8 + nudge, ry + (rh - 5) / 2, ">", 1, fade(accent, a2));
             }
         }
-        let foot = "RMB/ESC: CANCEL";
+        if view.results.is_empty() {
+            let my = y + ROWS_TOP + (VISIBLE_ROWS as i32 * ROW_H) / 2 - 8;
+            c.text_centered(cx, my, "NO APPS MATCH", 1, fade(rgb(255, 196, 120), ra));
+            c.text_centered(cx, my + 10, "BACKSPACE TO EDIT", 1, fade(rgb(110, 124, 156), ra));
+        }
+        // Scrollbar.
+        if bar {
+            let n = view.results.len() as i32;
+            let (tx, ty, th) = (x + w - 9, y + ROWS_TOP, VISIBLE_ROWS as i32 * ROW_H - 2);
+            c.fill_rect(tx, ty, 3, th, fade(rgba(0, 0, 0, 110), ra));
+            let kh = (th * VISIBLE_ROWS as i32 / n).max(6);
+            let ky = ty + (th - kh) * view.scroll as i32 / (n - VISIBLE_ROWS as i32).max(1);
+            c.fill_rect(tx, ky, 3, kh, fade(rgb(120, 170, 220), ra));
+            c.fill_rect(tx, ky, 3, 1, fade(rgb(200, 235, 255), ra));
+        }
+        let foot = "ENTER: OPEN   ESC: CANCEL";
         c.text_centered(cx, y + h - FOOTER_H + 3, foot, 1, fade(rgb(110, 124, 156), ra));
     }
 
@@ -251,10 +400,55 @@ pub fn draw_chooser(c: &mut Canvas, rect: (i32, i32, i32, i32), scale: f32, alph
     }
 }
 
-/// Row hit box inside a chooser panel rect.
-pub fn row_rect(rect: (i32, i32, i32, i32), i: usize) -> (i32, i32, i32, i32) {
+/// Search field: inset box, magnifier, query (or placeholder) and a blinking caret.
+fn draw_search_field(c: &mut Canvas, rect: (i32, i32, i32, i32), view: &LauncherView, a: f32, time: f32) {
     let (x, y, w, _) = rect;
-    (x + 6, y + ROWS_TOP + i as i32 * ROW_H, w - 12, ROW_H - 2)
+    let (sx, sy, sw, sh) = (x + 6, y + SEARCH_TOP, w - 12, SEARCH_H);
+    let accent = rgb(110, 228, 255);
+    c.fill_rect(sx, sy, sw, sh, fade(rgb(9, 11, 20), a));
+    c.fill_rect(sx, sy, sw, 1, fade(rgb(4, 5, 10), a));
+    c.fill_rect(sx, sy + sh - 1, sw, 1, fade(rgb(70, 84, 118), a));
+    let glow = 0.35 + 0.15 * (time * 3.0).sin();
+    c.rect_outline(sx - 1, sy - 1, sw + 2, sh + 2, fade(accent, a * glow));
+    // Magnifier: 5x5 ring + handle.
+    let (mx, my) = (sx + 3, sy + 3);
+    let ring = fade(rgb(150, 200, 235), a);
+    c.fill_rect(mx + 1, my, 3, 1, ring);
+    c.fill_rect(mx + 1, my + 4, 3, 1, ring);
+    c.fill_rect(mx, my + 1, 1, 3, ring);
+    c.fill_rect(mx + 4, my + 1, 1, 3, ring);
+    c.put(mx + 5, my + 5, ring);
+    c.put(mx + 6, my + 6, ring);
+    let tx = sx + 13;
+    let ty = sy + (sh - 5) / 2;
+    let caret_on = (time * 2.2).fract() < 0.6;
+    let count = if view.query.is_empty() { String::new() } else { view.results.len().to_string() };
+    let count_w = if count.is_empty() { 0 } else { text_width(&count, 1) + 4 };
+    if view.query.is_empty() {
+        c.text(tx + 3, ty, "TYPE TO SEARCH", 1, fade(rgb(92, 104, 136), a));
+        if caret_on {
+            c.fill_rect(tx, ty - 1, 1, 7, fade(accent, a));
+        }
+    } else {
+        let avail = sw - 13 - 6 - count_w;
+        let mut shown = view.query.to_uppercase();
+        while !shown.is_empty() && text_width(&shown, 1) > avail {
+            shown.remove(0);
+        }
+        c.text(tx, ty, &shown, 1, fade(rgb(245, 250, 255), a));
+        let cx = tx + text_width(&shown, 1) + 1;
+        if caret_on {
+            c.fill_rect(cx, ty - 1, 1, 7, fade(accent, a));
+        }
+        c.text(sx + sw - count_w, ty, &count, 1, fade(rgb(92, 104, 136), a));
+    }
+}
+
+/// Row hit box inside a launcher panel rect (`vis` = visible row 0..6).
+/// Rows leave room on the right for the scrollbar when there is one.
+pub fn row_rect(rect: (i32, i32, i32, i32), vis: usize, bar: bool) -> (i32, i32, i32, i32) {
+    let (x, y, w, _) = rect;
+    (x + 6, y + ROWS_TOP + vis as i32 * ROW_H, w - 12 - if bar { 6 } else { 0 }, ROW_H - 2)
 }
 
 /// CRT power effect over an interior rect. `p` = 0..1 progress.
@@ -307,5 +501,158 @@ pub fn draw_crt(c: &mut Canvas, x: i32, y: i32, w: i32, h: i32, p: f32, on: bool
         let edge = fade(white, 1.0 - k * 0.7);
         c.fill_rect(x, by, w, 1, edge);
         c.fill_rect(x, by + bh - 1, w, 1, edge);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Game;
+    use shared::{GameApi, GameEvent, InputState, Key};
+
+    fn app(id: &str, name: &str, fav: Option<u8>) -> AppInfo {
+        AppInfo { id: id.into(), name: name.into(), icon: None, favourite: fav }
+    }
+
+    fn catalog() -> Vec<AppInfo> {
+        vec![
+            app("firefox_firefox", "Firefox", Some(0)),
+            app("foot", "Terminal (foot)", Some(1)),
+            app("org.gnome.Calculator", "Calculator", Some(2)),
+            app("libreoffice-calc", "LibreOffice Calc", None),
+            app("org.gnome.Settings", "Settings", None),
+            app("a.firewall", "Firewall Config", None),
+            app("x.wildfire", "Wildfire", None),
+            app("b.backup", "Backups", None),
+            app("e.app", "Easy Fire Starter", None),
+        ]
+    }
+
+    fn names(apps: &[AppInfo], r: &[usize]) -> Vec<String> {
+        r.iter().map(|&i| apps[i].name.clone()).collect()
+    }
+
+    #[test]
+    fn empty_query_lists_favourites_then_alphabetical() {
+        let c = catalog();
+        let r = search(&c, "");
+        assert_eq!(r.len(), c.len());
+        assert_eq!(names(&c, &r[..4]), ["Firefox", "Terminal (foot)", "Calculator", "Backups"]);
+        assert_eq!(names(&c, &r[r.len() - 1..]), ["Wildfire"]);
+    }
+
+    #[test]
+    fn query_ranks_prefix_then_word_start_then_substring() {
+        let c = catalog();
+        // prefix: Firefox, Firewall Config (by name); word start: Easy Fire Starter; substring: Wildfire.
+        assert_eq!(names(&c, &search(&c, "FiRe")), ["Firefox", "Firewall Config", "Easy Fire Starter", "Wildfire"]);
+        assert_eq!(names(&c, &search(&c, "calc")), ["Calculator", "LibreOffice Calc"]);
+        assert_eq!(names(&c, &search(&c, "foot")), ["Terminal (foot)"]);
+        assert!(search(&c, "zzz").is_empty());
+    }
+
+    #[test]
+    fn ellipsize_fits() {
+        let s = ellipsize("A VERY LONG APPLICATION NAME INDEED", 60);
+        assert!(text_width(&s, 1) <= 60 && s.ends_with(".."));
+        assert_eq!(ellipsize("SHORT", 60), "SHORT");
+    }
+
+    struct D {
+        g: Game,
+        input: InputState,
+        events: Vec<GameEvent>,
+    }
+    impl D {
+        fn new() -> D {
+            let mut g = Game::new(crate::DEFAULT_SEED);
+            g.set_app_catalog(catalog());
+            let mut input = InputState::default();
+            input.game_focused = true;
+            let mut d = D { g, input, events: Vec::new() };
+            let px = (d.g.player.center().0 / crate::world::TILE as f32) as i32;
+            let ty = d.g.world.surface[px as usize] - 9;
+            d.g.screens.spawn(px + 1, ty, 14, 8);
+            d.steps(90);
+            d
+        }
+        fn step(&mut self) {
+            self.g.update(1.0 / 60.0, &self.input);
+            self.input.wheel = 0.0;
+            self.events.extend(self.g.drain_events());
+        }
+        fn steps(&mut self, n: usize) {
+            for _ in 0..n {
+                self.step();
+            }
+        }
+        fn tap(&mut self, k: Key) {
+            self.input.set(k, true);
+            self.step();
+            self.input.set(k, false);
+            self.step();
+        }
+        fn launched(&self) -> Vec<usize> {
+            self.events.iter().filter_map(|e| if let GameEvent::LaunchApp { app, .. } = e { Some(*app) } else { None }).collect()
+        }
+    }
+
+    #[test]
+    fn launcher_search_type_backspace_enter() {
+        let mut d = D::new();
+        assert!(d.g.wants_text(), "launcher open after building");
+        d.g.text_input("fire");
+        assert_eq!(d.g.screens.launcher_query(), "fire");
+        let first = d.g.screens.launcher_results()[0];
+        assert_eq!(catalog()[first].name, "Firefox");
+        // Number keys don't pick favourites while there's a query.
+        d.tap(Key::Hotbar2);
+        assert!(d.launched().is_empty());
+        for _ in 0..4 {
+            d.tap(Key::Backspace);
+        }
+        assert_eq!(d.g.screens.launcher_query(), "");
+        d.g.text_input("calc");
+        d.tap(Key::Down); // -> LibreOffice Calc
+        d.tap(Key::Enter);
+        assert_eq!(d.launched(), [3]);
+        d.steps(20);
+        assert!(!d.g.wants_text(), "launcher closed");
+        // The launching panel names the app.
+        let s = d.g.screens.list.iter().find(|s| s.launching.is_some()).unwrap();
+        assert_eq!(app_label(&d.g.screens.catalog, s.app.unwrap()), "LIBREOFFICE CALC");
+    }
+
+    #[test]
+    fn launcher_hotbar_and_digit_text_on_empty_query() {
+        let mut d = D::new();
+        // A digit typed into an empty query is left to the Hotbar key.
+        d.g.text_input("3");
+        assert_eq!(d.g.screens.launcher_query(), "");
+        d.tap(Key::Hotbar3);
+        assert_eq!(d.launched(), [2]); // Calculator (favourite 3)
+    }
+
+    #[test]
+    fn launcher_wheel_scrolls_and_esc_cancels() {
+        let mut d = D::new();
+        for _ in 0..8 {
+            d.input.wheel = -1.0;
+            d.step();
+        }
+        let ch = d.g.screens.chooser.unwrap();
+        assert_eq!(ch.hover, 8); // clamped to the last result
+        assert!(d.g.screens.launcher_scroll() >= 3, "scrolled to keep the highlight visible");
+        d.g.text_input("zzz");
+        assert!(d.g.screens.launcher_results().is_empty());
+        d.tap(Key::Enter); // nothing to launch
+        assert!(d.launched().is_empty());
+        d.tap(Key::Escape);
+        d.steps(20);
+        assert!(d.g.screens.chooser.is_none() && !d.g.wants_text());
+        assert!(d.launched().is_empty());
+        // Typing after the launcher closed does nothing.
+        d.g.text_input("x");
+        assert_eq!(d.g.screens.launcher_query(), "zzz");
     }
 }

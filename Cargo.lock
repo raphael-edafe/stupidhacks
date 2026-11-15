@@ -71,6 +71,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "apps"
+version = "0.1.0"
+dependencies = [
+ "png",
+]
+
+[[package]]
 name = "as-raw-xcb-connection"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -228,6 +235,7 @@ dependencies = [
 name = "compositor"
 version = "0.1.0"
 dependencies = [
+ "apps",
  "game",
  "png",
  "shared",
@@ -545,6 +553,7 @@ dependencies = [
 name = "game"
 version = "0.1.0"
 dependencies = [
+ "apps",
  "minifb",
  "png",
  "shared",
