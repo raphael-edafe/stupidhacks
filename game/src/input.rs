@@ -22,6 +22,26 @@ impl Controls {
         }
     }
 
+    /// The game got keyboard focus back this tick (the compositor took it away
+    /// from an app). `game_focused` survives the blanking above, so this sees
+    /// the raw focus transition.
+    pub fn focus_regained(&self) -> bool {
+        self.cur.game_focused && !self.prev.game_focused
+    }
+
+    /// A copy with every key and button released (mouse position and focus
+    /// kept): what a frozen player sees while a modal UI is up.
+    pub fn frozen(&self) -> Controls {
+        let blank = |s: &InputState| {
+            let mut b = InputState::default();
+            b.mouse_x = s.mouse_x;
+            b.mouse_y = s.mouse_y;
+            b.game_focused = s.game_focused;
+            b
+        };
+        Controls { cur: blank(&self.cur), prev: blank(&self.prev) }
+    }
+
     pub fn down(&self, k: Key) -> bool {
         self.cur.down(k)
     }

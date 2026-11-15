@@ -16,6 +16,7 @@ pub mod render;
 pub mod screens;
 pub mod sky;
 pub mod sprites;
+pub mod ui;
 pub mod world;
 
 use camera::Camera;
@@ -98,8 +99,10 @@ impl GameApi for Game {
         }
 
         self.sky.update(dt);
-        let busy = self.screens.update(dt, &ctl, &mut self.cam, &self.world, &mut self.particles, &mut self.events);
-        self.player.update(dt, &ctl, &mut self.cam, &mut self.world, &mut self.particles, busy);
+        let busy = self.screens.update(dt, &ctl, &mut self.cam, &mut self.world, &mut self.particles, &mut self.events, self.player.center());
+        // Modal UI (chooser, zoom): the player stands still and can't mine/place.
+        let player_ctl = if busy.frozen { ctl.frozen() } else { ctl };
+        self.player.update(dt, &player_ctl, &mut self.cam, &mut self.world, &mut self.particles, busy.mouse || busy.frozen);
 
         let mut ctx = MobCtx {
             world: &self.world,
@@ -124,6 +127,7 @@ impl GameApi for Game {
         self.screens.draw_world(&mut c, &self.cam);
         self.light.update(&self.world, &self.cam, self.sky.daylight(), &self.screens);
         self.light.apply(&mut c);
+        self.screens.draw_zoom_world(&mut c);
     }
 
     fn draw_fx(&mut self, rgba_buf: &mut [u8]) {
@@ -138,6 +142,8 @@ impl GameApi for Game {
             self.player.draw_cursor(&mut c, &self.cam, &self.world);
             hud::draw(&mut c, self);
         }
+        self.screens.draw_overlay(&mut c, &self.cam);
+        self.screens.draw_zoom_fx(&mut c, &self.cam);
     }
 
     fn screens(&self) -> Vec<ScreenInfo> {
@@ -206,5 +212,256 @@ mod tests {
         assert!(g.sky.is_night());
         g.draw_world(&mut a);
         g.draw_fx(&mut b);
+    }
+
+    // ---------- input-driven interaction tests ----------
+
+    use crate::screens::{REASON_OVERLAP, REASON_SMALL, ZOOM_RECT};
+    use crate::world::TILE;
+
+    /// Drives the game through `InputState` like a front-end would.
+    struct Driver {
+        g: Game,
+        input: InputState,
+        events: Vec<GameEvent>,
+    }
+
+    impl Driver {
+        fn new() -> Self {
+            let mut input = InputState::default();
+            input.game_focused = true;
+            let mut d = Driver { g: Game::new(DEFAULT_SEED), input, events: Vec::new() };
+            d.steps(60); // land
+            d
+        }
+        fn step(&mut self) {
+            self.g.update(1.0 / 60.0, &self.input);
+            self.events.extend(self.g.drain_events());
+        }
+        fn steps(&mut self, n: usize) {
+            for _ in 0..n {
+                self.step();
+            }
+        }
+        fn tap(&mut self, k: Key) {
+            self.input.set(k, true);
+            self.step();
+            self.input.set(k, false);
+            self.step();
+        }
+        fn mouse_at_tile(&mut self, tx: i32, ty: i32) {
+            self.input.mouse_x = (tx * TILE + 8) as f32 - self.g.cam.x;
+            self.input.mouse_y = (ty * TILE + 8) as f32 - self.g.cam.y;
+        }
+        /// B, then drag from tile `a` to tile `b` with LMB, release.
+        fn build_drag(&mut self, a: (i32, i32), b: (i32, i32)) {
+            if !self.g.screens.build_mode {
+                self.tap(Key::Build);
+            }
+            assert!(self.g.screens.build_mode);
+            self.mouse_at_tile(a.0, a.1);
+            self.input.lmb = true;
+            self.step();
+            for i in 1..=10 {
+                let f = i as f32 / 10.0;
+                let x = a.0 + ((b.0 - a.0) as f32 * f).round() as i32;
+                let y = a.1 + ((b.1 - a.1) as f32 * f).round() as i32;
+                self.mouse_at_tile(x, y);
+                self.step();
+            }
+            self.input.lmb = false;
+            self.step();
+        }
+        fn player_tile(&self) -> i32 {
+            (self.g.player.center().0 / TILE as f32) as i32
+        }
+        fn count(&self, f: impl Fn(&GameEvent) -> bool) -> usize {
+            self.events.iter().filter(|e| f(e)).count()
+        }
+        /// A built, empty screen right next to the player, chooser open.
+        fn screen_next_to_player(&mut self) -> ScreenId {
+            let px = self.player_tile();
+            let ty = self.g.world.surface[px as usize] - 9;
+            let id = self.g.screens.spawn(px + 1, ty, 14, 8);
+            self.steps(90);
+            assert_eq!(self.g.screens.chooser.map(|c| c.id), Some(id), "chooser pops up after building");
+            id
+        }
+        fn info(&self, id: ScreenId) -> ScreenInfo {
+            self.g.screens().into_iter().find(|s| s.id == id).expect("screen info")
+        }
+    }
+
+    #[test]
+    fn drag_build_over_terrain_clears_it() {
+        let mut d = Driver::new();
+        let x0 = d.player_tile() + 2;
+        let y0 = d.g.world.surface[x0 as usize] - 8;
+        let (w, h) = (14, 12); // bottom rows are underground: >25% terrain
+        let solid_before = (y0..y0 + h).flat_map(|y| (x0..x0 + w).map(move |x| (x, y))).filter(|&(x, y)| d.g.world.solid(x, y)).count();
+        assert!(solid_before as f32 > (w * h) as f32 * 0.25, "test rect should be >25% terrain ({solid_before})");
+
+        d.build_drag((x0, y0), (x0 + w - 1, y0 + h - 1));
+        assert_eq!(d.g.screens.list.len(), 1, "build must not be rejected for terrain");
+        let s = &d.g.screens.list[0];
+        assert_eq!((s.tx, s.ty, s.tw, s.th), (x0, y0, w, h));
+        assert!(!d.g.screens.build_mode);
+        for y in y0..y0 + h {
+            for x in x0..x0 + w {
+                assert_eq!(d.g.world.get(x, y), crate::world::Tile::Air, "tile {x},{y} not cleared");
+            }
+        }
+        d.steps(120);
+        let id = d.g.screens.list[0].id;
+        assert_eq!(d.count(|e| matches!(e, GameEvent::ScreenBuilt { id: i } if *i == id)), 1);
+        assert_eq!(d.g.screens.chooser.map(|c| c.id), Some(id));
+    }
+
+    #[test]
+    fn too_small_drag_is_rejected_with_reason() {
+        let mut d = Driver::new();
+        let x0 = d.player_tile() + 2;
+        let y0 = d.g.world.surface[x0 as usize] - 7;
+        d.build_drag((x0, y0), (x0 + 3, y0 + 2));
+        assert!(d.g.screens.list.is_empty());
+        assert_eq!(d.g.screens.reject.map(|r| r.1), Some(REASON_SMALL));
+        assert!(d.g.screens.build_mode, "stays in build mode for another try");
+        // Second try (still in build mode) succeeds.
+        d.build_drag((x0, y0), (x0 + 9, y0 + 6));
+        assert_eq!(d.g.screens.list.len(), 1);
+    }
+
+    #[test]
+    fn overlapping_drag_is_rejected_with_reason() {
+        let mut d = Driver::new();
+        let x0 = d.player_tile() + 2;
+        let y0 = d.g.world.surface[x0 as usize] - 10;
+        d.g.screens.spawn(x0, y0, 10, 7);
+        d.build_drag((x0 + 5, y0 + 3), (x0 + 16, y0 + 10));
+        assert_eq!(d.g.screens.list.len(), 1);
+        assert_eq!(d.g.screens.reject.map(|r| r.1), Some(REASON_OVERLAP));
+    }
+
+    #[test]
+    fn oversized_drag_stays_anchored_at_start() {
+        let mut d = Driver::new();
+        let ax = d.player_tile() + 10;
+        let ay = d.g.world.surface[ax as usize];
+        // Drag up-left far past the max size: the rect grows from the anchor.
+        d.build_drag((ax, ay), (ax - 60, ay - 40));
+        let s = &d.g.screens.list[0];
+        assert_eq!((s.tw, s.th), (crate::screens::MAX_W, crate::screens::MAX_H));
+        assert_eq!((s.tx + s.tw - 1, s.ty + s.th - 1), (ax, ay));
+    }
+
+    #[test]
+    fn chooser_launch_zoom_close_flow() {
+        let mut d = Driver::new();
+        let id = d.screen_next_to_player();
+
+        // Chooser is modal: the player doesn't move.
+        let x_before = d.g.player.x;
+        d.input.set(Key::Right, true);
+        d.steps(30);
+        d.input.set(Key::Right, false);
+        assert!((d.g.player.x - x_before).abs() < 0.5, "player moved while chooser open");
+
+        // Pick app 2 with the number key.
+        d.tap(Key::Hotbar2);
+        assert_eq!(d.count(|e| *e == GameEvent::LaunchApp { id, app: 1 }), 1);
+        assert!(d.g.screens.find(id).is_some_and(|s| s.launching.is_some()));
+        d.steps(20);
+        assert!(d.g.screens.chooser.is_none());
+        d.g.set_screen_occupied(id, true);
+        d.steps(30);
+
+        // Zoom in: FocusScreen, then the rect grows to ZOOM_RECT.
+        assert_eq!(d.g.screens.near, Some(id));
+        d.tap(Key::Zoom);
+        assert_eq!(d.count(|e| *e == GameEvent::FocusScreen { id }), 1);
+        d.input.game_focused = false; // compositor gave the window focus
+        d.steps(30);
+        let info = d.info(id);
+        assert_eq!(info.zoom, 1.0);
+        assert_eq!(info.rect, ZOOM_RECT);
+        let x_before = d.g.player.x;
+
+        // Compositor hands focus back with Esc for one tick.
+        d.input.game_focused = true;
+        d.input.set(Key::Escape, true);
+        d.step();
+        d.input.set(Key::Escape, false);
+        d.steps(30);
+        let info = d.info(id);
+        assert_eq!(info.zoom, 0.0);
+        let s = d.g.screens.find(id).unwrap();
+        assert_eq!((info.rect.w, info.rect.h), ((s.tw - 2) * TILE, (s.th - 2) * TILE));
+        assert!((d.g.player.x - x_before).abs() < 0.5);
+
+        // Close with X: event + empty at once.
+        d.tap(Key::CloseApp);
+        assert_eq!(d.count(|e| *e == GameEvent::CloseApp { id }), 1);
+        assert!(!d.g.screens.find(id).unwrap().occupied);
+        d.steps(40);
+
+        // Reopen with E, cancel with Esc: nothing launches.
+        d.tap(Key::Interact);
+        assert_eq!(d.g.screens.chooser.map(|c| c.id), Some(id));
+        d.tap(Key::Escape);
+        d.steps(20);
+        assert!(d.g.screens.chooser.is_none());
+        assert_eq!(d.count(|e| matches!(e, GameEvent::LaunchApp { .. })), 1);
+        assert!(d.g.screens.find(id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn chooser_click_selects_row_and_blocks_mining() {
+        let mut d = Driver::new();
+        let id = d.screen_next_to_player();
+        // Hold LMB on the ground under the player: must not mine while the chooser is up.
+        let (pcx, pcy) = d.g.player.center();
+        let (gx, gy) = ((pcx / TILE as f32) as i32, (pcy / TILE as f32) as i32 + 1);
+        let before = d.g.world.get(gx, gy);
+        d.mouse_at_tile(gx, gy);
+        d.input.lmb = true;
+        d.steps(90);
+        d.input.lmb = false;
+        d.step();
+        assert_eq!(d.g.world.get(gx, gy), before);
+        // Click row 3 ("Text Editor").
+        let (rx, ry) = d.g.screens.chooser_row_center(2, &d.g.cam).unwrap();
+        d.input.mouse_x = rx;
+        d.input.mouse_y = ry;
+        d.step();
+        d.input.lmb = true;
+        d.step();
+        d.input.lmb = false;
+        d.step();
+        assert_eq!(d.count(|e| *e == GameEvent::LaunchApp { id, app: 2 }), 1);
+        assert_eq!(d.count(|e| matches!(e, GameEvent::LaunchApp { .. })), 1);
+    }
+
+    #[test]
+    fn focus_return_or_app_exit_zooms_out() {
+        let mut d = Driver::new();
+        let id = d.screen_next_to_player();
+        d.tap(Key::Hotbar1);
+        d.steps(20);
+        d.g.set_screen_occupied(id, true);
+        d.steps(30);
+        d.tap(Key::Zoom);
+        d.input.game_focused = false;
+        d.steps(30);
+        // Focus comes back without an Escape key: still zooms out.
+        d.input.game_focused = true;
+        d.steps(30);
+        assert!(d.g.screens.zoom.is_none());
+        // App exits on its own while zoomed: zoom out too.
+        d.tap(Key::Zoom);
+        d.steps(10);
+        d.g.set_screen_occupied(id, false);
+        d.steps(30);
+        assert!(d.g.screens.zoom.is_none());
+        assert_eq!(d.count(|e| matches!(e, GameEvent::FocusScreen { .. })), 2);
     }
 }
