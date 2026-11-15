@@ -4,12 +4,22 @@ use crate::camera::Camera;
 use crate::gfx::{rgb, rgba, with_alpha, Canvas};
 use crate::input::Controls;
 use crate::particles::Particles;
-use crate::sprites::Sprites;
+use crate::sprites::{Sprites, PLAYER_H, PLAYER_W, SWORD_GRIPS};
 use crate::world::{Tile, World, TILE};
 use shared::Key;
 
-pub const W: f32 = 10.0;
-pub const H: f32 = 19.0;
+/// Hitbox size, world px. The 16x40 sprite is centred on it with its feet on the bottom edge
+/// (the top of the hard hat pokes 3 px above the box).
+pub const W: f32 = 12.0;
+pub const H: f32 = 37.0;
+/// Jump tuning: ~54 px apex (3 tiles plus margin) in ~0.3 s.
+const JUMP_V: f32 = 380.0;
+const GRAVITY: f32 = 1250.0;
+const MAX_FALL: f32 = 560.0;
+/// Hand (front glove centre) in sprite px, facing right.
+const HAND: (i32, i32) = (9, 24);
+/// Shoulder in sprite px (sword arc centre).
+const SHOULDER: (i32, i32) = (9, 15);
 const REACH: f32 = 6.0 * TILE as f32;
 const SWING_TIME: f32 = 0.28;
 
@@ -32,6 +42,10 @@ pub struct Player {
     pub selected: usize,
     pub spawn: (f32, f32),
     anim: f32,
+    /// Seconds since spawn (idle breathing).
+    t: f32,
+    /// Seconds airborne (short drops while walking downhill keep the walk cycle).
+    air: f32,
     coyote: f32,
     jump_buffer: f32,
     mining: Option<(i32, i32, f32)>,
@@ -65,6 +79,8 @@ impl Player {
             selected: 0,
             spawn,
             anim: 0.0,
+            t: 0.0,
+            air: 0.0,
             coyote: 0.0,
             jump_buffer: 0.0,
             mining: None,
@@ -79,6 +95,7 @@ impl Player {
 
     /// `busy` = another system (screen building) owns the mouse this frame.
     pub fn update(&mut self, dt: f32, ctl: &Controls, cam: &mut Camera, world: &mut World, fx: &mut Particles, busy: bool) {
+        self.t += dt;
         self.invuln = (self.invuln - dt).max(0.0);
         self.swing = (self.swing - dt).max(0.0);
         self.place_cooldown = (self.place_cooldown - dt).max(0.0);
@@ -114,15 +131,15 @@ impl Player {
             self.jump_buffer -= dt;
         }
         if self.jump_buffer > 0.0 && self.coyote > 0.0 {
-            self.vy = -330.0;
+            self.vy = -JUMP_V;
             self.jump_buffer = 0.0;
             self.coyote = 0.0;
             fx.debris(self.x + W / 2.0, self.y + H, rgb(200, 190, 170), 4);
         }
-        if !(ctl.down(Key::Jump) || ctl.down(Key::Up)) && self.vy < -120.0 {
-            self.vy = -120.0;
+        if !(ctl.down(Key::Jump) || ctl.down(Key::Up)) && self.vy < -130.0 {
+            self.vy = -130.0;
         }
-        self.vy = (self.vy + 1100.0 * dt).min(520.0);
+        self.vy = (self.vy + GRAVITY * dt).min(MAX_FALL);
 
         // --- collide ---
         let was_on_ground = self.on_ground;
@@ -137,9 +154,12 @@ impl Player {
             self.respawn(fx);
         }
 
-        if self.on_ground && self.vx.abs() > 5.0 {
-            self.anim += dt * self.vx.abs() / 14.0;
-        } else {
+        self.air = if self.on_ground { 0.0 } else { self.air + dt };
+        let walking_frames = self.on_ground || self.air < 0.1;
+        if walking_frames && self.vx.abs() > 5.0 {
+            // ~18 frames/s at full speed: 3 strides per second.
+            self.anim += dt * self.vx.abs() / 7.0;
+        } else if walking_frames {
             self.anim = 0.0;
         }
 
@@ -266,6 +286,11 @@ impl Player {
         }
         if dy > 0.0 {
             self.on_ground = true;
+            // Snap the feet exactly onto the tile top so the sprite never floats half a pixel.
+            let top = ((self.y + H) / TILE as f32).ceil() * TILE as f32;
+            if top - (self.y + H) < 0.75 && !self.collides(self.x, top - H, world) {
+                self.y = top - H;
+            }
         }
         self.vy = 0.0;
     }
@@ -273,10 +298,10 @@ impl Player {
     /// Hitbox of the current sword swing, if active: (x, y, w, h) in world px.
     pub fn attack_box(&self) -> Option<(f32, f32, f32, f32)> {
         if self.swing > SWING_TIME * 0.25 {
-            let (cx, cy) = self.center();
-            let w = 28.0;
-            let x = if self.facing > 0.0 { cx } else { cx - w };
-            Some((x, cy - 18.0, w, 30.0))
+            let (cx, sy) = self.shoulder();
+            let w = 32.0;
+            let x = if self.facing > 0.0 { cx - 2.0 } else { cx + 2.0 - w };
+            Some((x, sy - 24.0, w, 40.0))
         } else {
             None
         }
@@ -311,64 +336,113 @@ impl Player {
         self.invuln = 1.5;
     }
 
+    /// Sprite top-left in world px (the sprite is centred on the hitbox, feet on its bottom).
+    fn sprite_origin(&self) -> (f32, f32) {
+        (self.x + W / 2.0 - PLAYER_W as f32 / 2.0, self.y + H - PLAYER_H as f32)
+    }
+
+    /// Shoulder of the front arm, world px (sword arc centre).
+    fn shoulder(&self) -> (f32, f32) {
+        let (ox, oy) = self.sprite_origin();
+        let sx = if self.facing < 0.0 { PLAYER_W - 1 - SHOULDER.0 } else { SHOULDER.0 };
+        (ox + sx as f32 + 0.5, oy + SHOULDER.1 as f32)
+    }
+
+    fn frame<'s>(&self, sprites: &'s Sprites) -> &'s crate::gfx::Sprite {
+        let walking_frames = self.on_ground || self.air < 0.1;
+        if !walking_frames {
+            if self.vy < 0.0 {
+                &sprites.player_jump
+            } else {
+                &sprites.player_fall
+            }
+        } else if self.anim > 0.0 {
+            let n = sprites.player_walk.len().max(1);
+            &sprites.player_walk[(self.anim as usize) % n]
+        } else {
+            // Breathing: long inhale, shorter exhale.
+            let n = sprites.player_idle.len().max(1);
+            let phase = (self.t % 1.6) / 1.6;
+            &sprites.player_idle[if phase < 0.6 { 0 } else { 1 % n }]
+        }
+    }
+
     /// Draw on the FX layer. `light` scales brightness (night darkness).
     pub fn draw(&self, c: &mut Canvas, cam: &Camera, sprites: &Sprites, light: f32) {
         if self.invuln > 0.0 && ((self.invuln * 14.0) as i32) % 2 == 1 {
             return;
         }
-        let spr = if !self.on_ground {
-            &sprites.player_jump
-        } else if self.anim > 0.0 {
-            &sprites.player_walk[(self.anim as usize) % 4]
-        } else {
-            &sprites.player_idle
-        };
+        let spr = self.frame(sprites);
         let flip = self.facing < 0.0;
-        let (vx, vy) = cam.to_view(self.x - 1.0, self.y + H - spr.h as f32 + 1.0);
+        let (ox, oy) = self.sprite_origin();
+        let (vx, vy) = cam.to_view(ox, oy);
         let k = light.clamp(0.6, 1.0); // keep the hero readable at night
 
-        // Pickaxe bobbing while mining.
-        if let Some((_, _, p)) = self.mining {
-            let bob = ((p * 30.0).sin() * 3.0) as i32;
-            let px = if flip { vx - 7 } else { vx + 7 };
-            c.sprite_shaded(&sprites.pickaxe, px, vy + 2 + bob, flip, k);
+        // Wind-up: the raised sword is behind the head, so it goes under the body.
+        if self.swing > 0.0 {
+            self.draw_slash(c, cam, sprites, k, true);
         }
 
         c.sprite_shaded(spr, vx, vy, flip, k);
 
+        // Pickaxe in the front hand while mining: raised, then struck, a few times a second.
+        if let Some((_, _, p)) = self.mining {
+            let struck = (p * 30.0).sin() > 0.0;
+            let (tool, grip) = if struck { (&sprites.pickaxe_down, (1, 1)) } else { (&sprites.pickaxe, (1, 12)) };
+            let (hx, hy) = (if flip { spr.w - 1 - HAND.0 } else { HAND.0 }, HAND.1);
+            let gx = if flip { tool.w - 1 - grip.0 } else { grip.0 };
+            c.sprite_shaded(tool, vx + hx - gx, vy + hy - grip.1, flip, k);
+        }
+
         if self.swing > 0.0 {
-            self.draw_slash(c, cam, sprites, k);
+            self.draw_slash(c, cam, sprites, k, false);
         }
     }
 
-    fn draw_slash(&self, c: &mut Canvas, cam: &Camera, sprites: &Sprites, k: f32) {
+    /// Two passes: `behind` (under the body) draws the sword only while it's raised behind
+    /// the head; the other pass draws the trail and the sword once it comes over.
+    fn draw_slash(&self, c: &mut Canvas, cam: &Camera, sprites: &Sprites, k: f32, behind: bool) {
         let t = 1.0 - self.swing / SWING_TIME; // 0 -> 1
-        let (cx, cy) = self.center();
-        let (vx, vy) = cam.to_view(cx, cy - 2.0);
+        let (sx, sy) = self.shoulder();
+        let (vx, vy) = cam.to_view(sx, sy);
         let f = self.facing;
         // Arc from up-back (-110deg) to down-front (+50deg).
         let a0 = -110f32.to_radians();
         let a1 = 50f32.to_radians();
         let head = a0 + (a1 - a0) * (t * 1.4).min(1.0);
-        let trail = 9;
+        let deg = head.to_degrees();
+        if behind != (deg < -75.0) {
+            return;
+        }
+        if !behind {
+            self.draw_trail(c, vx, vy, head, t);
+        }
+        // Sword sprite nearest the arc angle, grip in the hand at arm's length.
+        let i = (((deg + 90.0) / 45.0).round().clamp(0.0, 3.0)) as usize;
+        let (Some(s), Some(&(px, py))) = (sprites.sword_swing.get(i), SWORD_GRIPS.get(i)) else { return };
+        let (gx, gy) = (vx + (head.cos() * 6.0 * f).round() as i32, vy + (head.sin() * 6.0).round() as i32);
+        let x = if f < 0.0 { gx - (s.w - 1 - px) } else { gx - px };
+        c.sprite_shaded(s, x, gy - py, f < 0.0, k.max(0.6));
+    }
+
+    fn draw_trail(&self, c: &mut Canvas, vx: i32, vy: i32, head: f32, t: f32) {
+        let f = self.facing;
+        let a0 = -110f32.to_radians();
+        let trail = 10;
         for i in 0..trail {
-            let a = head - i as f32 * 0.13;
+            let a = head - i as f32 * 0.12;
             if a < a0 {
                 break;
             }
             let fade = 1.0 - i as f32 / trail as f32;
             let alpha = (220.0 * fade * (1.0 - t * 0.6)) as u8;
-            for r in 12..24 {
+            for r in 9..24 {
                 let x = vx + (a.cos() * r as f32 * f) as i32;
                 let y = vy + (a.sin() * r as f32) as i32;
-                let col = if r > 20 { rgba(255, 255, 255, alpha) } else { rgba(170, 220, 255, alpha / 2) };
+                let col = if r > 20 { rgba(255, 255, 255, alpha) } else { rgba(150, 236, 255, alpha / 2) };
                 c.blend(x, y, col);
             }
         }
-        // Sword sprite at the arc head.
-        let sx = vx + (head.cos() * 14.0 * f) as i32 - 6;
-        let sy = vy + (head.sin() * 14.0) as i32 - 6;
-        c.sprite_shaded(&sprites.sword, sx, sy, f < 0.0, k.max(0.6));
     }
 
     /// Mining crack + hover outline (FX layer).

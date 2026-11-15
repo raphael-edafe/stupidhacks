@@ -1,4 +1,6 @@
-//! Procedurally generated pixel art: tile textures, back walls, player sprites.
+//! Pixel art: procedural tile textures and back walls, plus PNG sprites (player, tools,
+//! torch, app icons, mobs) drawn with pxl (sources in `assets/sprites/src/*.px.js`).
+//! The PNGs are embedded with `include_bytes!` and decoded once at startup.
 //! All original art; nothing is copied from any existing game. Owner: person B1.
 
 use crate::gfx::{lerp_color, rgb, rgba, shade, Rgba, Sprite};
@@ -12,11 +14,155 @@ pub struct Sprites {
     /// Underground back wall variants (already darkened).
     pub back_dirt: Vec<Sprite>,
     pub back_stone: Vec<Sprite>,
-    pub player_idle: Sprite,
-    pub player_walk: [Sprite; 4],
+    /// Player frames, 16x40, facing right (flip for left). Feet on the bottom row.
+    /// Idle: 2 frames (breathing). Walk: 6 frames.
+    pub player_idle: Vec<Sprite>,
+    pub player_walk: Vec<Sprite>,
     pub player_jump: Sprite,
+    pub player_fall: Sprite,
+    /// 14x14, pointing up-right. Grip at the bottom-left.
     pub sword: Sprite,
+    /// The sword at the four swing angles [up, up-right, right, down-right] (facing right;
+    /// flip for left). Grip pixel of each in `SWORD_GRIPS`.
+    pub sword_swing: Vec<Sprite>,
+    /// 14x14, raised: handle from bottom-left (grip) to the head at the top-right.
     pub pickaxe: Sprite,
+    /// The pickaxe rotated 90deg clockwise (struck): grip top-left, head bottom-right.
+    pub pickaxe_down: Sprite,
+    /// 16x16 app-chooser icons, same order as `shared::APPS`.
+    pub app_icons: Vec<Sprite>,
+    /// Ground "glitch bug": 4 walk frames, 20x14 each, facing RIGHT (flip for left).
+    pub mob_crawler: Vec<Sprite>,
+    /// "Bit bat": 3 flap frames (up, level, down), 18x12 each, symmetric.
+    pub mob_bat: Vec<Sprite>,
+}
+
+// --- embedded PNGs (rebuild with assets/sprites/src/build.sh) ---
+macro_rules! asset {
+    ($name:literal) => {
+        ($name, include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../assets/sprites/", $name, ".png")) as &[u8])
+    };
+}
+type Asset = (&'static str, &'static [u8]);
+const PLAYER_IDLE: Asset = asset!("player_idle");
+const PLAYER_WALK: Asset = asset!("player_walk");
+const PLAYER_JUMP: Asset = asset!("player_jump");
+const PLAYER_FALL: Asset = asset!("player_fall");
+const SWORD: Asset = asset!("sword");
+const SWORD_UP: Asset = asset!("sword_up");
+const PICKAXE: Asset = asset!("pickaxe");
+const TORCH: Asset = asset!("torch");
+const MOB_CRAWLER: Asset = asset!("mob_crawler");
+const MOB_BAT: Asset = asset!("mob_bat");
+const APP_ICONS: [Asset; 6] = [
+    asset!("icon_terminal"),
+    asset!("icon_files"),
+    asset!("icon_editor"),
+    asset!("icon_calculator"),
+    asset!("icon_monitor"),
+    asset!("icon_matrix"),
+];
+
+/// Hand position inside each `sword_swing` sprite.
+pub const SWORD_GRIPS: [(i32, i32); 4] = [(3, 10), (3, 10), (3, 3), (3, 3)];
+pub const PLAYER_W: i32 = 16;
+pub const PLAYER_H: i32 = 40;
+pub const CRAWLER_W: i32 = 20;
+pub const CRAWLER_H: i32 = 14;
+pub const BAT_W: i32 = 18;
+pub const BAT_H: i32 = 12;
+
+/// Decode an 8-bit PNG (any colour type) into a straight-alpha RGBA sprite.
+pub fn decode_png(bytes: &[u8]) -> Result<Sprite, String> {
+    let mut dec = png::Decoder::new(std::io::Cursor::new(bytes));
+    dec.set_transformations(png::Transformations::normalize_to_color8());
+    let mut reader = dec.read_info().map_err(|e| e.to_string())?;
+    let size = reader.output_buffer_size().ok_or("png too large")?;
+    let mut buf = vec![0u8; size];
+    let info = reader.next_frame(&mut buf).map_err(|e| e.to_string())?;
+    if info.bit_depth != png::BitDepth::Eight {
+        return Err(format!("unsupported bit depth {:?}", info.bit_depth));
+    }
+    let (w, h) = (info.width as i32, info.height as i32);
+    let ch = match info.color_type {
+        png::ColorType::Grayscale => 1,
+        png::ColorType::GrayscaleAlpha => 2,
+        png::ColorType::Rgb => 3,
+        png::ColorType::Rgba => 4,
+        png::ColorType::Indexed => return Err("indexed png not expanded".into()),
+    };
+    let mut s = Sprite::new(w, h);
+    for y in 0..h {
+        let row = &buf[y as usize * info.line_size..];
+        for x in 0..w {
+            let p = &row[x as usize * ch..x as usize * ch + ch];
+            let c = match ch {
+                1 => [p[0], p[0], p[0], 255],
+                2 => [p[0], p[0], p[0], p[1]],
+                3 => [p[0], p[1], p[2], 255],
+                _ => [p[0], p[1], p[2], p[3]],
+            };
+            s.px[(y * w + x) as usize] = if c[3] == 0 { [0, 0, 0, 0] } else { c };
+        }
+    }
+    Ok(s)
+}
+
+/// Magenta/black checker, so a missing sprite is obvious but never crashes the game.
+fn placeholder(w: i32, h: i32) -> Sprite {
+    let mut s = Sprite::new(w, h);
+    for y in 0..h {
+        for x in 0..w {
+            s.set(x, y, if (x / 2 + y / 2) % 2 == 0 { rgb(255, 0, 255) } else { rgb(20, 0, 20) });
+        }
+    }
+    s
+}
+
+/// Decode one sprite; on failure log and return a `w`x`h` placeholder.
+fn load(a: Asset, w: i32, h: i32) -> Sprite {
+    match decode_png(a.1) {
+        Ok(s) if s.w == w && s.h == h => s,
+        Ok(s) => {
+            eprintln!("sprites: {}.png is {}x{}, expected {}x{}", a.0, s.w, s.h, w, h);
+            s
+        }
+        Err(e) => {
+            eprintln!("sprites: failed to decode {}.png: {e}; using a placeholder", a.0);
+            placeholder(w, h)
+        }
+    }
+}
+
+/// Decode a horizontal strip of `n` frames of `fw`x`fh`.
+fn load_strip(a: Asset, fw: i32, fh: i32, n: i32) -> Vec<Sprite> {
+    let strip = load(a, fw * n, fh);
+    if strip.w < fw * n || strip.h < fh {
+        eprintln!("sprites: {}.png too small for {n} frames of {fw}x{fh}; using placeholders", a.0);
+        return vec![placeholder(fw, fh); n as usize];
+    }
+    (0..n)
+        .map(|i| {
+            let mut s = Sprite::new(fw, fh);
+            for y in 0..fh {
+                for x in 0..fw {
+                    s.set(x, y, strip.get(i * fw + x, y));
+                }
+            }
+            s
+        })
+        .collect()
+}
+
+/// Rotate 90 degrees clockwise.
+fn rot90(s: &Sprite) -> Sprite {
+    let mut r = Sprite::new(s.h, s.w);
+    for y in 0..s.h {
+        for x in 0..s.w {
+            r.set(s.h - 1 - y, x, s.get(x, y));
+        }
+    }
+    r
 }
 
 impl Sprites {
@@ -42,16 +188,24 @@ impl Sprites {
         let darken = |s: Sprite, k: f32| Sprite { px: s.px.iter().map(|&c| shade(c, k)).collect(), ..s };
         let back_dirt = (0..VARIANTS).map(|v| darken(tile_texture(Tile::Dirt, v as i32 + 10), 0.38)).collect();
         let back_stone = (0..VARIANTS).map(|v| darken(tile_texture(Tile::Stone, v as i32 + 10), 0.36)).collect();
-        let (player_idle, player_walk, player_jump) = player_sprites();
+        let pickaxe = load(PICKAXE, 14, 14);
+        let sword = load(SWORD, 14, 14);
+        let sword_up = load(SWORD_UP, 7, 14);
         Sprites {
             tiles,
             back_dirt,
             back_stone,
-            player_idle,
-            player_walk,
-            player_jump,
-            sword: sword_sprite(),
-            pickaxe: pickaxe_sprite(),
+            player_idle: load_strip(PLAYER_IDLE, PLAYER_W, PLAYER_H, 2),
+            player_walk: load_strip(PLAYER_WALK, PLAYER_W, PLAYER_H, 6),
+            player_jump: load(PLAYER_JUMP, PLAYER_W, PLAYER_H),
+            player_fall: load(PLAYER_FALL, PLAYER_W, PLAYER_H),
+            sword_swing: vec![sword_up.clone(), sword.clone(), rot90(&sword_up), rot90(&sword)],
+            sword,
+            pickaxe_down: rot90(&pickaxe),
+            pickaxe,
+            app_icons: APP_ICONS.iter().map(|&a| load(a, 16, 16)).collect(),
+            mob_crawler: load_strip(MOB_CRAWLER, CRAWLER_W, CRAWLER_H, 4),
+            mob_bat: load_strip(MOB_BAT, BAT_W, BAT_H, 3),
         }
     }
 
@@ -191,36 +345,7 @@ fn tile_texture(t: Tile, v: i32) -> Sprite {
             }
             s
         }
-        Tile::Torch => {
-            Sprite::from_ascii(
-                &[
-                    "................",
-                    "................",
-                    "................",
-                    ".......y........",
-                    "......yYy.......",
-                    "......yWy.......",
-                    ".......o........",
-                    ".......s........",
-                    ".......s........",
-                    ".......S........",
-                    ".......s........",
-                    ".......S........",
-                    ".......s........",
-                    ".......S........",
-                    "................",
-                    "................",
-                ],
-                &[
-                    ('y', rgb(255, 170, 40)),
-                    ('Y', rgb(255, 230, 120)),
-                    ('W', rgb(255, 255, 220)),
-                    ('o', rgb(230, 110, 30)),
-                    ('s', rgb(140, 96, 56)),
-                    ('S', rgb(110, 74, 42)),
-                ],
-            )
-        }
+        Tile::Torch => load(TORCH, TILE, TILE),
         Tile::Bedrock => speckled(rgb(40, 38, 48), rgb(58, 56, 68), rgb(26, 24, 32), 11, v),
     }
 }
@@ -248,95 +373,51 @@ pub fn grass_overlay(x: i32, y: i32) -> Vec<(i32, i32, Rgba)> {
     out
 }
 
-fn player_sprites() -> (Sprite, [Sprite; 4], Sprite) {
-    // An original little engineer: amber hard hat, teal jacket, dark trousers.
-    let pal: &[(char, Rgba)] = &[
-        ('h', rgb(255, 184, 48)),  // hat
-        ('H', rgb(206, 132, 24)),  // hat shade
-        ('k', rgb(246, 200, 160)), // skin
-        ('K', rgb(212, 158, 120)), // skin shade
-        ('e', rgb(30, 30, 46)),    // eye
-        ('j', rgb(46, 170, 168)),  // jacket
-        ('J', rgb(30, 118, 124)),  // jacket shade
-        ('b', rgb(250, 220, 90)),  // belt buckle / visor stripe
-        ('p', rgb(54, 58, 92)),    // trousers
-        ('P', rgb(36, 38, 64)),    // trousers shade
-        ('s', rgb(70, 46, 34)),    // boots
-        ('o', rgb(20, 18, 28)),    // outline
-    ];
-    let top = [
-        "...oooooo...",
-        "..ohhhhhho..",
-        ".ohhhhbhhho.",
-        ".oHHHHHHHHo.",
-        "..okkkkkeo..",
-        "..okkkkkko..",
-        "..oKkkkkKo..",
-        "...okkkko...",
-        "..ojjjjjjo..",
-        ".ojjjjjjjjo.",
-        ".ojjjjjjJjo.",
-        ".okjjjjjJko.",
-        ".oKjjjjjJKo.",
-        "..obbbbbbo..",
-    ];
-    let legs_idle = ["..oppppppo..", "..opPo.opPo.", "..opPo.opPo.", "..opPo.opPo.", "..osso.osso.", "............"];
-    let legs_w1 = ["..oppppppo..", "..opPo.opPo.", ".opPo..opPo.", ".opPo...opo.", ".osso...osso", "............"];
-    let legs_w2 = ["..oppppppo..", "..opPoopPo..", "...opPopPo..", "...opPoPo...", "...ossoso...", "............"];
-    let legs_w3 = ["..oppppppo..", ".opPo..opPo.", ".opPo...opPo", "opPo.....opo", "osso.....oss", "............"];
-    let legs_jump = ["..oppppppo..", ".opPo..opPo.", ".opo....opo.", ".oss....oss.", "............", "............"];
-    let build = |legs: &[&str]| {
-        let rows: Vec<&str> = top.iter().copied().chain(legs.iter().copied()).collect();
-        Sprite::from_ascii(&rows, pal)
-    };
-    (
-        build(&legs_idle),
-        [build(&legs_w1), build(&legs_w2), build(&legs_w3), build(&legs_w2)],
-        build(&legs_jump),
-    )
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn sword_sprite() -> Sprite {
-    Sprite::from_ascii(
-        &[
-            "..........ow",
-            ".........owW",
-            "........owWo",
-            ".......owWo.",
-            "......owWo..",
-            ".....owWo...",
-            "..o.owWo....",
-            "..oowWo.....",
-            "...gWo......",
-            "..gogo......",
-            ".bo..oo.....",
-            "bb..........",
-        ],
-        &[
-            ('w', rgb(230, 240, 255)),
-            ('W', rgb(160, 186, 220)),
-            ('o', rgb(30, 30, 50)),
-            ('g', rgb(255, 196, 60)),
-            ('b', rgb(120, 70, 40)),
-        ],
-    )
-}
+    #[test]
+    fn embedded_sprites_decode_with_expected_sizes() {
+        for (a, w, h) in [
+            (PLAYER_IDLE, 32, 40),
+            (PLAYER_WALK, 96, 40),
+            (PLAYER_JUMP, 16, 40),
+            (PLAYER_FALL, 16, 40),
+            (SWORD, 14, 14),
+            (SWORD_UP, 7, 14),
+            (PICKAXE, 14, 14),
+            (TORCH, 16, 16),
+            (MOB_CRAWLER, 80, 14),
+            (MOB_BAT, 54, 12),
+        ]
+        .into_iter()
+        .chain(APP_ICONS.iter().map(|&a| (a, 16, 16)))
+        {
+            let s = decode_png(a.1).unwrap_or_else(|e| panic!("{}: {e}", a.0));
+            assert_eq!((s.w, s.h), (w, h), "{}", a.0);
+            assert!(s.px.iter().any(|p| p[3] == 255), "{} is empty", a.0);
+        }
+    }
 
-fn pickaxe_sprite() -> Sprite {
-    Sprite::from_ascii(
-        &[
-            "...oooooo...",
-            "..oiiiiiio..",
-            ".oiIo..oIio.",
-            ".oio.ob.oio.",
-            ".oo..ob..oo.",
-            ".....ob.....",
-            ".....ob.....",
-            ".....ob.....",
-            ".....ob.....",
-            ".....ob.....",
-            ".....oo.....",
-        ],
-        &[('o', rgb(30, 30, 50)), ('i', rgb(170, 176, 196)), ('I', rgb(230, 234, 246)), ('b', rgb(140, 92, 52))],
-    )
+    #[test]
+    fn bad_png_falls_back_to_placeholder() {
+        let s = load(("broken", b"not a png"), 5, 7);
+        assert_eq!((s.w, s.h), (5, 7));
+        let frames = load_strip(("broken", b"nope"), 4, 4, 3);
+        assert_eq!(frames.len(), 3);
+    }
+
+    #[test]
+    fn player_feet_touch_bottom_row() {
+        let sp = Sprites::new();
+        for f in sp.player_idle.iter().chain(&sp.player_walk).chain([&sp.player_jump, &sp.player_fall]) {
+            assert_eq!((f.w, f.h), (PLAYER_W, PLAYER_H));
+        }
+        for f in sp.player_idle.iter().chain(&sp.player_walk) {
+            let bottom = (0..f.w).any(|x| f.get(x, f.h - 1)[3] > 0);
+            assert!(bottom, "grounded frames must reach the bottom row");
+        }
+        assert_eq!(sp.app_icons.len(), shared::APPS.len());
+    }
 }
