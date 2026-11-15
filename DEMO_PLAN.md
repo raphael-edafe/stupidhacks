@@ -36,6 +36,16 @@ ScreenDestroyed}`, and the `GameApi` trait (`update`, `draw_world`, `draw_fx`, `
 `drain_events`). The game shakes the rect itself, so the window and its frame move together.
 
 ## Work split
+**Update:** both people started on the game, so `game/` is split into B1 (core: world, player, screens, rendering) and B2 (night: sky, light, mobs, HUD). See the subtask lists below and the ownership section in CLAUDE.md. The compositor (person A's list) belongs to whoever finishes first.
+
+### B2 subtasks (night and atmosphere): `sky.rs`, `light.rs`, `mobs.rs`, `hud.rs`
+1. **Mobs** (highest priority, since the video's climax depends on them): Crawler (walks and hops) and Bat (flies and swoops) with original ASCII-art sprites. They spawn at night off-screen, path to `screens.targets()`, and call `screens.damage()` on contact. Sword hits through `player.attack_box()` give knockback, a white hit flash and a death pop. They burn up at dawn. Tune so one night breaks exactly one screen on camera.
+2. **Sky:** stars that fade in, a sun/moon arc, two layers of parallax hills, drifting clouds and a warm dusk band.
+3. **Light:** a per-tile light map (sky light from above, torches, crystals and screens as sources) with smooth falloff, so caves are dark and torches glow at night. Keep it cheap: recompute only the visible area.
+4. **HUD:** pixel hotbar slots with item icons, hearts, a day/night dial, big "NIGHT IS COMING" and "DAWN" banners, and an FPS readout (hidden with F1).
+
+### B1 subtasks (core): done in the first pass, then polish
+World gen, autotiled rendering, player physics, mining and placing, screen building and lifecycle (build animation, booting panel, cracks, glitch, explosion), particles, camera shake, and the preview with headless `--shots`. Next: polish from the screenshot review, then pick up the compositor.
 
 ### Person A: compositor (`compositor/`)
 1. Copy smithay's `smallvil` (from the git tag matching the pinned smithay version) and get `foot` showing up and taking input in the nested window. **Target: 1 hour.**

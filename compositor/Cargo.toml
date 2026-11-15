@@ -5,4 +5,4 @@ edition.workspace = true
 
 [dependencies]
 shared = { path = "../shared" }
-game = { path = "../game" }
+game = { path = "../game", default-features = false }

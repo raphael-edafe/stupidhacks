@@ -14,11 +14,20 @@ Art must be original or CC0. Terraria-like gameplay is fine, but no Terraria ass
 
 ## Ownership (avoid merge conflicts)
 
-- **Person A owns `compositor/`**: Smithay (based on the `smallvil` example), winit nested backend, window ↔ screen binding, input routing, launching and closing apps.
-- **Person B owns `game/`**: world, player, building, mobs, day/night, and the software pixel renderer. It has **no Smithay dependency**. Iterate in the standalone `preview` binary.
+Both people are currently on the game, split by module. Only edit files you own. Whoever finishes first picks up the compositor, which is the riskiest piece.
+
+- **B1 (game core):** `game/src/{lib,world,sprites,render,player,screens,particles,camera,input,gfx}.rs` and `game/src/bin/preview.rs`.
+- **B2 (night and atmosphere):** `game/src/{sky,light,mobs,hud}.rs`. These started as working stubs with fixed signatures and a TODO list at the top of each file. Flesh them out without changing how `lib.rs` calls them. If B2 needs a new hook in a B1 file (say, a new `Player` method), ask B1 or add it in a small, separate commit.
+- **Compositor (`compositor/`), unowned:** Smithay (based on the `smallvil` example), winit nested backend, window ↔ screen binding, input routing, launching and closing apps.
 - **`shared/` is the contract** (`shared/src/lib.rs`: `GameApi`, `InputState`, `ScreenInfo`, `GameEvent`). Both people must agree before changing it. Keep it dependency-free.
 
-Commit small and often, pull before pushing, and only touch your own crate.
+The game crate has **no Smithay dependency**. Iterate in the standalone `preview` binary. Commit small and often, and pull before pushing.
+
+Interfaces B2 builds on:
+- **Mobs** get a `MobCtx` (world, screens, player, particles, camera, sky, events). They attack screens through `screens.targets()` and `screens.damage(id, amount, impact_point, fx, events)`, hit the player with `player.hurt()`, and take sword hits from `player.attack_box()`.
+- **Particle helpers:** `fx.debris`, `fx.sparkle`, `fx.explosion`.
+- **Drawing helpers** in `gfx::Canvas`: `blend`, `glow` (additive), `sprite_shaded`, `sprite_flat`, `text_shadow`, `text_centered`. Sprites can be built from ASCII art with `Sprite::from_ascii`, as in `sprites.rs`.
+- **Demo knobs:** `N` skips to dusk, `G` toggles god mode, `F1` hides the HUD, `B` enters build mode (then drag), `T` places a torch.
 
 ## Architecture
 
@@ -36,7 +45,8 @@ The compositor reports window attach/detach back through `set_screen_occupied`. 
 ## Commands
 
 ```
-cargo run -p game --bin preview --release   # game alone in a minifb window
+cargo run -p game --bin preview --release   # game alone in a minifb window (--scale 3 for 1080p)
+cargo run -p game --bin preview --release -- --shots /tmp/shots   # headless scripted demo -> PNGs + perf line
 cargo run -p compositor --release           # nested compositor inside the GNOME session
 cargo run -p compositor --release -- --no-kill
 cargo test -p game                          # all game tests
