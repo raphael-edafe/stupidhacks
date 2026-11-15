@@ -11,6 +11,10 @@
 //!
 //! TODO(B2): more mob kinds (bats that swoop at screens), loot drops.
 
+mod bat;
+mod critter_art;
+mod critters;
+
 use crate::camera::Camera;
 use crate::gfx::{rgb, rgba, shade, with_alpha, Canvas, Rgba, Sprite};
 use crate::light::Light;
@@ -233,6 +237,10 @@ pub struct Mobs {
     eye_glow: f32,
     /// Seconds left of the post-kill cooldown (SIEGE_COOLDOWN); screens are safe while > 0.
     calm: f32,
+    /// Night flyers that dive-bomb screens (`mobs/bat.rs`).
+    bats: bat::Bats,
+    /// Passive animals, birds and fireflies (`mobs/critters.rs`).
+    critters: critters::Critters,
     sprites: Vec<ZombieFrames>,
 }
 
@@ -251,6 +259,8 @@ impl Mobs {
             was_night: false,
             eye_glow: 0.0,
             calm: 0.0,
+            bats: bat::Bats::new(),
+            critters: critters::Critters::new(),
             sprites: zombie_sprites(),
         }
     }
@@ -325,6 +335,11 @@ impl Mobs {
             death_pop(z, ctx.fx, rng);
         }
         list.retain(|z| z.hp > 0);
+
+        // --- bats, then the harmless animals (birds scatter from zombies and bats) ---
+        self.bats.update(dt, ctx, &mut self.calm, &|_, _| true);
+        let threats: Vec<(f32, f32)> = self.list.iter().map(|z| z.center()).chain(self.bats.centers()).collect();
+        self.critters.update(dt, ctx, &threats);
     }
 
     /// Pick a patch of ground near (but not too near) the player and raise a zombie there.
@@ -356,6 +371,8 @@ impl Mobs {
 
     /// Draw on the FX layer (over windows).
     pub fn draw(&self, c: &mut Canvas, cam: &Camera, light: &Light) {
+        // Animals under the zombies, bats on top.
+        self.critters.draw(c, cam, light);
         for z in &self.list {
             let frames = &self.sprites[z.variant];
             let spr = if matches!(z.state, MobState::Rising { .. }) {
@@ -407,6 +424,7 @@ impl Mobs {
                 c.put(ex, ey, rgb(240, 255, 190));
             }
         }
+        self.bats.draw(c, cam, light, self.eye_glow);
     }
 }
 
@@ -874,6 +892,13 @@ mod tests {
         }
     }
 
+    /// Raise a zombie with its left edge at world x, feet on the ground there.
+    fn raise_zombie_at(g: &mut Game, x: f32) {
+        let col = ((x + W / 2.0) / TILE as f32).floor() as i32;
+        let feet = (g.world.ground_y(col) * TILE) as f32 - 0.5;
+        g.mobs.spawn_zombie(x, feet, -1.0, 1);
+    }
+
     #[test]
     fn sprites_are_well_formed() {
         for rows in [&TOP[..], &LEGS_IDLE[..], &LEGS_W1[..], &LEGS_W2[..], &LEGS_W3[..], &LEGS_W4[..]] {
@@ -919,6 +944,10 @@ mod tests {
         tick(&mut g, 2.0); // let it finish building
         g.drain_events();
         g.sky.clock = DAY_LEN + 0.1;
+        // A zombie rising beside the screen, on the far side from the player
+        // (zombies that bump into the god-mode player just keep chasing them).
+        let (fx, _, fw, _) = g.screens.list[0].frame_px();
+        raise_zombie_at(&mut g, fx + fw + 40.0);
         tick(&mut g, NIGHT_LEN - 5.0);
         let ev = g.drain_events();
         let hits = ev.iter().filter(|e| matches!(e, GameEvent::ScreenDamaged { id: i, .. } if *i == id)).count();
@@ -939,6 +968,8 @@ mod tests {
             s.hp = CLAW_DAMAGE * 0.5;
         }
         g.sky.clock = DAY_LEN + 0.1;
+        let (fx, _, fw, _) = g.screens.list[1].frame_px();
+        raise_zombie_at(&mut g, fx + fw + 40.0);
 
         let mut input = InputState::default();
         input.game_focused = true;
