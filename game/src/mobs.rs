@@ -66,7 +66,7 @@ const TOUCH_DAMAGE: i32 = 1;
 const AGGRO: f32 = 48.0;
 
 /// Spawn distance from the player (px): far enough to be fair, close enough
-/// that they rise on camera (the view is `shared::VIEW_W` = 768 px wide).
+/// that they rise on camera (the close view is `shared::VIEW_W` = 640 px wide).
 const SPAWN_MIN: f32 = 150.0;
 const SPAWN_MAX: f32 = 290.0;
 /// Delay after nightfall before the first zombie.
