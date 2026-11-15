@@ -123,7 +123,8 @@ impl Player {
             hover: None,
         };
         // Starting kit.
-        for (it, n) in [(Item::WoodSword, 1), (Item::Dirt, 30), (Item::Plank, 20), (Item::Stone, 10), (Item::Torch, 12), (Item::Workbench, 1)] {
+        // Hotbar: sword, dirt, planks, torch, door, workbench (stone fits in the bag).
+        for (it, n) in [(Item::WoodSword, 1), (Item::Dirt, 30), (Item::Plank, 20), (Item::Torch, 12), (Item::Door, 1), (Item::Workbench, 1), (Item::Stone, 10)] {
             p.give(it, n);
         }
         p
@@ -325,7 +326,9 @@ impl Player {
                 let speed = if self.god { 3.0 } else { 1.0 };
                 let p = progress + dt * speed / hardness;
                 if p >= 1.0 {
-                    world.set(tx, ty, Tile::Air);
+                    if !world.remove_door(tx, ty) {
+                        world.set(tx, ty, Tile::Air);
+                    }
                     if let Some(it) = Item::from_tile(target) {
                         self.give(it, 1);
                     }
@@ -362,15 +365,70 @@ impl Player {
         } else {
             None
         };
+        // Right click on a door opens/closes it (whatever you're holding).
+        if ctl.rmb_pressed() && in_reach && target.is_door() && self.place_cooldown <= 0.0 {
+            let closing = target == Tile::DoorOpen;
+            if !(closing && self.door_overlaps_me(tx, world)) {
+                if let Some(open) = world.toggle_door(tx, ty) {
+                    let (px, py) = ((tx * TILE + 8) as f32, (ty * TILE) as f32);
+                    fx.debris(px, py, Tile::Door.color(), if open { 3 } else { 5 });
+                }
+            }
+            self.place_cooldown = 0.25;
+            return;
+        }
         if let Some((it, t)) = place.and_then(|it| it.tile().map(|t| (it, t))) {
-            if self.place_cooldown <= 0.0 && in_reach && target == Tile::Air && self.can_place(tx, ty, world, t) {
-                if self.take(it, 1) {
-                    world.set(tx, ty, t);
-                    fx.debris((tx * TILE + 8) as f32, (ty * TILE + 8) as f32, t.color(), 4);
-                    self.place_cooldown = 0.12;
+            if self.place_cooldown <= 0.0 && in_reach && target == Tile::Air {
+                // Placeables are unlimited: you need one in the hotbar, but it's never used up.
+                let have = it.unlimited() || self.take(it, 1);
+                if have {
+                    if t == Tile::Door {
+                        if self.place_door(tx, ty, world) {
+                            fx.debris((tx * TILE + 8) as f32, (ty * TILE) as f32, t.color(), 8);
+                            self.place_cooldown = 0.25;
+                        }
+                    } else if self.can_place(tx, ty, world, t) {
+                        world.set(tx, ty, t);
+                        fx.debris((tx * TILE + 8) as f32, (ty * TILE + 8) as f32, t.color(), 4);
+                        self.place_cooldown = 0.12;
+                    }
                 }
             }
         }
+    }
+
+    /// A door is 3 tiles tall: the clicked cell is its bottom (or, if that cell is
+    /// floating, the door drops onto the floor below, up to 2 tiles). Needs a solid
+    /// floor and 3 free cells, and can't be built inside the player.
+    fn place_door(&self, tx: i32, ty: i32, world: &mut World) -> bool {
+        let mut bottom = ty;
+        for _ in 0..2 {
+            if world.solid(tx, bottom + 1) {
+                break;
+            }
+            bottom += 1;
+        }
+        if !world.solid(tx, bottom + 1) {
+            return false;
+        }
+        if (bottom - 2..=bottom).any(|y| world.get(tx, y) != Tile::Air) {
+            return false;
+        }
+        let (x0, x1) = ((tx * TILE) as f32, ((tx + 1) * TILE) as f32);
+        let (y0, y1) = (((bottom - 2) * TILE) as f32, ((bottom + 1) * TILE) as f32);
+        if x0 < self.x + W && x1 > self.x && y0 < self.y + H && y1 > self.y {
+            return false;
+        }
+        for y in bottom - 2..=bottom {
+            world.set(tx, y, Tile::Door);
+        }
+        true
+    }
+
+    /// The player stands in this door's column (don't slam it shut on them).
+    fn door_overlaps_me(&self, tx: i32, _world: &World) -> bool {
+        let (x0, x1) = ((tx * TILE) as f32, ((tx + 1) * TILE) as f32);
+        x0 < self.x + W && x1 > self.x
     }
 
     fn can_place(&self, tx: i32, ty: i32, world: &World, t: Tile) -> bool {

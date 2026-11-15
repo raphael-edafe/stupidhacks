@@ -73,7 +73,7 @@ pub fn draw(c: &mut Canvas, g: &Game) {
             let spr = g.sprites.icon(it);
             c.sprite(spr, x + SLOT / 2 - spr.w / 2, y + SLOT / 2 - spr.h / 2, false);
             let n = p.count(it);
-            if !it.is_tool() && (n > 1 || p.god) {
+            if !it.is_tool() && !it.unlimited() && (n > 1 || p.god) {
                 let s = if p.god { "*".to_string() } else { n.to_string() };
                 c.text_shadow(x + SLOT - 1 - text_width(&s, 1), y + SLOT - 7, &s, 1, rgb(255, 255, 255));
             }

@@ -22,12 +22,16 @@ pub enum Tile {
     Bedrock,
     /// Crafting station (furniture: you walk through it). Press E near it to craft.
     Workbench,
+    /// Closed door segment (doors are 3 tiles tall). Blocks the player and mobs.
+    Door,
+    /// Open door segment: walk-through.
+    DoorOpen,
 }
 
 impl Tile {
     /// Blocks movement.
     pub fn solid(self) -> bool {
-        !matches!(self, Tile::Air | Tile::Log | Tile::Leaves | Tile::Torch | Tile::Workbench)
+        !matches!(self, Tile::Air | Tile::Log | Tile::Leaves | Tile::Torch | Tile::Workbench | Tile::DoorOpen)
     }
 
     /// Seconds to mine with bare hands. `None` = unbreakable.
@@ -35,7 +39,7 @@ impl Tile {
         match self {
             Tile::Air | Tile::Bedrock => None,
             Tile::Torch => Some(0.05),
-            Tile::Workbench => Some(0.3),
+            Tile::Workbench | Tile::Door | Tile::DoorOpen => Some(0.3),
             Tile::Leaves => Some(0.12),
             Tile::Dirt | Tile::Grass => Some(0.25),
             Tile::Log | Tile::Plank => Some(0.35),
@@ -51,6 +55,7 @@ impl Tile {
         match self {
             Tile::Grass => Tile::Dirt,
             Tile::Log => Tile::Plank,
+            Tile::DoorOpen => Tile::Door,
             t => t,
         }
     }
@@ -72,7 +77,12 @@ impl Tile {
             Tile::Torch => rgb(255, 200, 90),
             Tile::Bedrock => rgb(40, 38, 48),
             Tile::Workbench => rgb(160, 112, 66),
+            Tile::Door | Tile::DoorOpen => rgb(150, 100, 60),
         }
+    }
+
+    pub fn is_door(self) -> bool {
+        matches!(self, Tile::Door | Tile::DoorOpen)
     }
 
     /// Light emitted (0..1).
@@ -188,6 +198,46 @@ impl World {
             if !self.decor.is_empty() {
                 self.decor.retain(|d| !(d.x == x && (d.y == y || d.y + 1 == y)));
             }
+        }
+    }
+
+    /// The door column containing (x, y): (top row, bottom row), if it's a door tile.
+    pub fn door_span(&self, x: i32, y: i32) -> Option<(i32, i32)> {
+        if !self.get(x, y).is_door() {
+            return None;
+        }
+        let mut top = y;
+        while self.get(x, top - 1).is_door() && y - top < 8 {
+            top -= 1;
+        }
+        let mut bottom = y;
+        while self.get(x, bottom + 1).is_door() && bottom - y < 8 {
+            bottom += 1;
+        }
+        Some((top, bottom))
+    }
+
+    /// Open a closed door / close an open one (the whole column). Returns the new state
+    /// (true = open), or None if (x, y) isn't a door.
+    pub fn toggle_door(&mut self, x: i32, y: i32) -> Option<bool> {
+        let (top, bottom) = self.door_span(x, y)?;
+        let open = self.get(x, y) == Tile::Door;
+        for yy in top..=bottom {
+            self.set(x, yy, if open { Tile::DoorOpen } else { Tile::Door });
+        }
+        Some(open)
+    }
+
+    /// Remove a whole door column. Returns true if there was one.
+    pub fn remove_door(&mut self, x: i32, y: i32) -> bool {
+        match self.door_span(x, y) {
+            Some((top, bottom)) => {
+                for yy in top..=bottom {
+                    self.set(x, yy, Tile::Air);
+                }
+                true
+            }
+            None => false,
         }
     }
 

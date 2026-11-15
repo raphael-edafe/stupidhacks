@@ -27,9 +27,10 @@ pub enum Item {
     CopperChest,
     IronChest,
     CrystalChest,
+    Door,
 }
 
-pub const COUNT: usize = 20;
+pub const COUNT: usize = 21;
 
 pub const ALL: [Item; COUNT] = [
     Item::Dirt,
@@ -52,6 +53,7 @@ pub const ALL: [Item; COUNT] = [
     Item::CopperChest,
     Item::IronChest,
     Item::CrystalChest,
+    Item::Door,
 ];
 
 /// Material tier for swords (Wood..Crystal) and armour (Copper..Crystal).
@@ -92,6 +94,7 @@ impl Item {
             Item::CopperChest => "COPPER CHESTPLATE",
             Item::IronChest => "IRON CHESTPLATE",
             Item::CrystalChest => "CRYSTAL CHESTPLATE",
+            Item::Door => "DOOR",
         }
     }
 
@@ -106,6 +109,7 @@ impl Item {
             Item::Crystal => Some(Tile::Crystal),
             Item::Torch => Some(Tile::Torch),
             Item::Workbench => Some(Tile::Workbench),
+            Item::Door => Some(Tile::Door),
             _ => None,
         }
     }
@@ -121,6 +125,7 @@ impl Item {
             Tile::Crystal => Some(Item::Crystal),
             Tile::Torch => Some(Item::Torch),
             Tile::Workbench => Some(Item::Workbench),
+            Tile::Door | Tile::DoorOpen => Some(Item::Door),
             Tile::Air | Tile::Leaves | Tile::Bedrock => None,
         }
     }
@@ -150,6 +155,12 @@ impl Item {
     /// Tools and weapons are never used up (the hotbar slot stays when you have one).
     pub fn is_tool(self) -> bool {
         self.sword().is_some() || self == Item::Bow
+    }
+
+    /// Building blocks, torches and doors never run out. The workbench is still
+    /// used up when placed, which frees its hotbar slot for crafted gear.
+    pub fn unlimited(self) -> bool {
+        self.tile().is_some() && self != Item::Workbench
     }
 
     /// Belongs in the hotbar (armour is worn instead).

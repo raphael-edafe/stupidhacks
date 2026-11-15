@@ -68,6 +68,20 @@ pub fn draw_tiles_t(c: &mut Canvas, world: &World, sprites: &Sprites, cam: &Came
             let sx = tx * TILE - ox;
             let sy = ty * TILE - oy;
 
+            // Doors: a 3-tile column; pick the top/middle/bottom slice.
+            if t.is_door() {
+                if world.is_underground(tx, ty) {
+                    draw_wall(c, world, sprites, ao, tx, ty, sx, sy);
+                }
+                let (top, bottom) = world.door_span(tx, ty).unwrap_or((ty, ty));
+                let seg = if ty == top { 0 } else if ty == bottom { 2 } else { 1 };
+                let set = if t == Tile::Door { &sprites.doors_closed } else { &sprites.doors_open };
+                if let Some(slice) = set.get(seg) {
+                    blit(c, slice, sx, sy, t == Tile::Door);
+                }
+                continue;
+            }
+
             if !t.solid() {
                 if world.is_underground(tx, ty) {
                     draw_wall(c, world, sprites, ao, tx, ty, sx, sy);

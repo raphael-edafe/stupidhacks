@@ -378,7 +378,7 @@ mod tests {
         g.draw_fx(&mut b);
         assert!(a.chunks_exact(4).all(|p| p[3] == 255), "world layer must be opaque");
         g.sky.skip_to_dusk();
-        tick(&mut g, 900);
+        tick(&mut g, 1500);
         assert!(g.sky.is_night());
         g.draw_world(&mut a);
         g.draw_fx(&mut b);
@@ -543,6 +543,69 @@ mod tests {
         d.steps(20); // close animation
         assert!(d.g.screens.chooser.is_none());
         id
+    }
+
+    #[test]
+    fn doors_place_toggle_and_mine() {
+        use crate::items::Item;
+        use crate::world::Tile;
+        let mut d = Driver::new();
+        let slot = d.g.player.hotbar.iter().position(|s| *s == Some(Item::Door)).expect("door in hotbar");
+        d.g.player.selected = slot;
+        // Two tiles right of the player, on the ground.
+        let tx = d.player_tile() + 2;
+        let floor = d.g.world.ground_y(tx);
+        d.mouse_at_tile(tx, floor - 1);
+        d.input.rmb = true;
+        d.step();
+        d.input.rmb = false;
+        d.steps(20);
+        for y in floor - 3..floor {
+            assert_eq!(d.g.world.get(tx, y), Tile::Door, "door segment at {y}");
+        }
+        assert!(d.g.world.solid(tx, floor - 2), "closed door blocks");
+        assert_eq!(d.g.player.count(Item::Door), 1, "placing is free");
+        // Right click opens it (walk-through), again closes it.
+        d.input.rmb = true;
+        d.step();
+        d.input.rmb = false;
+        d.steps(20);
+        assert_eq!(d.g.world.get(tx, floor - 2), Tile::DoorOpen);
+        assert!(!d.g.world.solid(tx, floor - 2));
+        d.input.rmb = true;
+        d.step();
+        d.input.rmb = false;
+        d.steps(20);
+        assert_eq!(d.g.world.get(tx, floor - 1), Tile::Door);
+        // Mining any segment removes the whole door.
+        d.g.player.selected = 0;
+        d.mouse_at_tile(tx, floor - 2);
+        d.input.lmb = true;
+        d.steps(40);
+        d.input.lmb = false;
+        d.step();
+        for y in floor - 3..floor {
+            assert_eq!(d.g.world.get(tx, y), Tile::Air);
+        }
+    }
+
+    #[test]
+    fn placing_blocks_is_unlimited() {
+        use crate::items::Item;
+        let mut d = Driver::new();
+        let slot = d.g.player.hotbar.iter().position(|s| *s == Some(Item::Dirt)).expect("dirt in hotbar");
+        d.g.player.selected = slot;
+        let before = d.g.player.count(Item::Dirt);
+        let px = d.player_tile();
+        for k in 0..5 {
+            let tx = px + 2 + k;
+            d.mouse_at_tile(tx, d.g.world.ground_y(tx) - 1);
+            d.input.rmb = true;
+            d.steps(10);
+            d.input.rmb = false;
+            d.steps(2);
+        }
+        assert_eq!(d.g.player.count(Item::Dirt), before);
     }
 
     #[test]

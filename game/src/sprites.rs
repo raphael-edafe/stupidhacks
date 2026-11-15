@@ -83,6 +83,9 @@ pub struct Sprites {
     /// Surface decorations per `DecorKind`, 16x16, bottom row = ground line.
     pub decor: Vec<Sprite>,
     pub torch: Sprite,
+    /// Door column slices, top to bottom (3 x 16x16), closed and open.
+    pub doors_closed: Vec<Sprite>,
+    pub doors_open: Vec<Sprite>,
     pub leaves: Sprite,
     /// Sky backdrop (drawn by sky.rs): seamless 640-px-wide strips far -> near
     /// (mountains 640x120, hills 640x100, treeline 640x80), painted in daylight colours.
@@ -136,6 +139,9 @@ const SWORD: Asset = asset!("sword");
 const SWORD_UP: Asset = asset!("sword_up");
 const PICKAXE: Asset = asset!("pickaxe");
 const TORCH: Asset = asset!("torch");
+const DOOR_CLOSED: Asset = asset!("door_closed");
+const DOOR_OPEN: Asset = asset!("door_open");
+const DOOR_ICON: Asset = asset!("door_icon");
 const MOB_CRAWLER: Asset = asset!("mob_crawler");
 const MOB_BAT: Asset = asset!("mob_bat");
 const APP_ICONS: [Asset; 6] = [
@@ -328,6 +334,13 @@ impl Sprites {
         let bedrock = edge_set(TILES_BEDROCK);
         let torch = load(TORCH, TILE, TILE);
         let leaves = load(LEAVES, TILE, TILE);
+        let slices = |a: Asset| {
+            let full = load(a, TILE, 3 * TILE);
+            (0..3).map(|i| crop(&full, 0, i * TILE, TILE, TILE)).collect::<Vec<_>>()
+        };
+        let doors_closed = slices(DOOR_CLOSED);
+        let doors_open = slices(DOOR_OPEN);
+        let door_icon = load(DOOR_ICON, TILE, TILE);
         let trunks: Vec<Vec<Sprite>> = TRUNKS.iter().map(|&a| load_cells(a, TILE, TILE, TRUNK_VARIANTS as i32, 1)).collect();
 
         let all = [
@@ -360,6 +373,8 @@ impl Sprites {
                 Tile::Log => (0..VARIANTS).map(|v| trunks[0][v % TRUNK_VARIANTS].clone()).collect(),
                 Tile::Leaves => vec![leaves.clone(); VARIANTS],
                 Tile::Torch => vec![torch.clone(); VARIANTS],
+                Tile::Door => vec![doors_closed[1].clone(); VARIANTS],
+                Tile::DoorOpen => vec![doors_open[1].clone(); VARIANTS],
                 Tile::Workbench => vec![tile_texture(Tile::Workbench, 0); VARIANTS],
             })
             .collect();
@@ -380,6 +395,7 @@ impl Sprites {
                 }
                 match it {
                     Item::Torch => torch.clone(),
+                    Item::Door => door_icon.clone(),
                     Item::Bow => Sprite::from_ascii(&ICON_BOW, &ICON_PAL),
                     Item::Arrow => Sprite::from_ascii(&ICON_ARROW, &ICON_PAL),
                     _ => match (it.tile(), it.armour()) {
@@ -432,6 +448,8 @@ impl Sprites {
             mob_crawler: load_strip(MOB_CRAWLER, CRAWLER_W, CRAWLER_H, 4),
             mob_bat: load_strip(MOB_BAT, BAT_W, BAT_H, 3),
             icons,
+            doors_closed,
+            doors_open,
             sword_tiers,
         }
     }
@@ -494,7 +512,7 @@ fn speckled(base: Rgba, light: Rgba, dark: Rgba, salt: i32, v: i32) -> Sprite {
 
 fn tile_texture(t: Tile, v: i32) -> Sprite {
     match t {
-        Tile::Air => Sprite::new(TILE, TILE),
+        Tile::Air | Tile::Door | Tile::DoorOpen => Sprite::new(TILE, TILE),
         Tile::Dirt => {
             let mut s = speckled(rgb(134, 88, 58), rgb(160, 110, 74), rgb(100, 64, 44), 1, v);
             // A couple of pebbles.

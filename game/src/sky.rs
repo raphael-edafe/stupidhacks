@@ -8,10 +8,11 @@ use crate::camera::Camera;
 use crate::gfx::{lerp_color, rgb, shade, with_alpha, Canvas, Rgba, Sprite};
 use crate::world::{fbm1, hash2, World, SURFACE, TILE};
 
-pub const DAY_LEN: f32 = 40.0;
-pub const NIGHT_LEN: f32 = 30.0;
+/// About 5 minutes of day and 2 of night (N skips straight to dusk for demos).
+pub const DAY_LEN: f32 = 300.0;
+pub const NIGHT_LEN: f32 = 120.0;
 /// Seconds of dusk/dawn fade at each end of the night.
-pub const FADE: f32 = 6.0;
+pub const FADE: f32 = 12.0;
 
 pub struct Sky {
     /// Seconds into the current day+night cycle. 0 = sunrise.
@@ -51,7 +52,8 @@ impl Sky {
     /// Demo knob: jump to a few seconds before nightfall (so dusk is visible).
     pub fn skip_to_dusk(&mut self) {
         if !self.is_night() {
-            self.clock = DAY_LEN - FADE - 4.0;
+            // A short golden hour, then the light fades into night.
+            self.clock = (DAY_LEN - FADE - 4.0).max(self.clock);
         }
     }
 
@@ -84,9 +86,9 @@ impl Sky {
     pub fn warmth(&self) -> f32 {
         let t = self.clock;
         let dusk = {
-            let a = DAY_LEN - FADE - 8.0;
+            let a = DAY_LEN - FADE - 18.0;
             let peak = DAY_LEN - FADE * 0.4;
-            let end = DAY_LEN + 3.0;
+            let end = DAY_LEN + 6.0;
             if t < a || t > end {
                 0.0
             } else if t < peak {
@@ -99,7 +101,7 @@ impl Sky {
         let dawn = {
             // around clock = cycle (== 0)
             let d = if t > cycle / 2.0 { t - cycle } else { t };
-            let x = 1.0 - ((d + 1.0).abs() / 5.0).min(1.0);
+            let x = 1.0 - ((d + 2.0).abs() / 10.0).min(1.0);
             smooth(x)
         };
         dusk.max(dawn * 0.8)
