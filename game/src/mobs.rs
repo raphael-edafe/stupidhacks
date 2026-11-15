@@ -3,7 +3,8 @@
 //! At night zombies claw their way out of the ground near the player, shamble
 //! to the nearest online screen and claw at its frame. They go for the player
 //! instead when the player is closer than any screen, take sword hits
-//! (knockback, flash, death pop), and catch fire at dawn.
+//! (knockback, flash, death pop), and catch fire at dawn. Once a screen is
+//! destroyed the horde leaves screens alone for SIEGE_COOLDOWN seconds.
 //!
 //! All tuning lives in the consts below. The sprites are original pixel art
 //! (office-worker zombies in torn shirts and ties), built with `Sprite::from_ascii`.
@@ -50,9 +51,13 @@ const RISE_TIME: f32 = 0.9;
 /// Sword hits to kill one on the first night (+1 every 3 nights).
 const BASE_HP: i32 = 3;
 
-/// Screen HP (0..1) removed per claw, and seconds between claws.
-const CLAW_DAMAGE: f32 = 0.035;
+/// Screen HP (0..1) removed per claw (20 claws to destroy one), and seconds between claws.
+const CLAW_DAMAGE: f32 = 0.05;
 const CLAW_COOLDOWN: f32 = 1.0;
+/// After a screen is destroyed, the whole horde leaves screens alone for this
+/// many seconds (they go for the player instead), so the next one doesn't fall
+/// straight after.
+const SIEGE_COOLDOWN: f32 = 8.0;
 /// How far past its hitbox a zombie can claw a frame, sideways and upwards.
 /// REACH_UP = 16 means a frame floating up to one tile above a zombie's head is
 /// reachable standing; higher ones it has to leap at.
@@ -226,6 +231,8 @@ pub struct Mobs {
     was_night: bool,
     /// 0..1: how brightly eyes glow. Set from the sky in `update`, used by `draw`.
     eye_glow: f32,
+    /// Seconds left of the post-kill cooldown (SIEGE_COOLDOWN); screens are safe while > 0.
+    calm: f32,
     sprites: Vec<ZombieFrames>,
 }
 
@@ -243,6 +250,7 @@ impl Mobs {
             spawn_timer: 0.0,
             was_night: false,
             eye_glow: 0.0,
+            calm: 0.0,
             sprites: zombie_sprites(),
         }
     }
@@ -295,11 +303,20 @@ impl Mobs {
         }
 
         // --- AI, physics, combat ---
+        self.calm = (self.calm - dt).max(0.0);
         let targets = ctx.screens.targets();
         let burn = daylight > BURN_LIGHT;
-        let Mobs { list, rng, .. } = self;
+        let Mobs { list, rng, calm, .. } = self;
         for z in list.iter_mut() {
-            update_zombie(z, dt, ctx, &targets, burn, rng);
+            // During the cooldown there's nothing to attack but the player.
+            let t: &[(ScreenId, (f32, f32, f32, f32))] = if *calm > 0.0 { &[] } else { targets.as_slice() };
+            let seen = ctx.events.len();
+            update_zombie(z, dt, ctx, t, burn, rng);
+            // This zombie's claw finished a screen: start the cooldown right away,
+            // so the rest of the horde doesn't hit another screen this tick.
+            if ctx.events[seen..].iter().any(|e| matches!(e, GameEvent::ScreenDamaged { hp, .. } if *hp <= 0.0)) {
+                *calm = SIEGE_COOLDOWN;
+            }
         }
         separate(list, ctx.world);
 
@@ -906,6 +923,42 @@ mod tests {
         let ev = g.drain_events();
         let hits = ev.iter().filter(|e| matches!(e, GameEvent::ScreenDamaged { id: i, .. } if *i == id)).count();
         assert!(hits > 0, "zombies never reached the screen");
+    }
+
+    #[test]
+    fn horde_backs_off_after_a_screen_falls() {
+        let mut g = Game::new(DEFAULT_SEED);
+        g.player.god = true;
+        // Two screens side by side, both one claw from destruction.
+        let tx = g.world.w / 2 - 2;
+        g.screens.spawn(tx, g.world.surface[tx as usize] - 12, 22, 10);
+        let tx2 = tx + 24;
+        g.screens.spawn(tx2, g.world.surface[tx2 as usize] - 12, 22, 10);
+        tick(&mut g, 2.0); // let them finish building
+        for s in g.screens.list.iter_mut() {
+            s.hp = CLAW_DAMAGE * 0.5;
+        }
+        g.sky.clock = DAY_LEN + 0.1;
+
+        let mut input = InputState::default();
+        input.game_focused = true;
+        let mut frames = 0;
+        while g.mobs.calm <= 0.0 && frames < 60 * 25 {
+            g.update(1.0 / 60.0, &input);
+            frames += 1;
+        }
+        assert!(g.mobs.calm > 0.0, "no screen fell during the night");
+        let kill = g.drain_events();
+        let fallen = kill.iter().filter(|e| matches!(e, GameEvent::ScreenDamaged { hp, .. } if *hp <= 0.0)).count();
+        assert_eq!(fallen, 1, "only one screen should fall before the cooldown kicks in");
+
+        // The survivor is one claw from death: any claw during the cooldown would show up.
+        tick(&mut g, SIEGE_COOLDOWN - 0.5);
+        let during = g.drain_events();
+        assert!(
+            !during.iter().any(|e| matches!(e, GameEvent::ScreenDamaged { .. })),
+            "zombies clawed a screen during the cooldown"
+        );
     }
 
     #[test]
