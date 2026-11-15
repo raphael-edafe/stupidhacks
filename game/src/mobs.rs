@@ -55,9 +55,9 @@ const BASE_HP: i32 = 3;
 const CLAW_DAMAGE: f32 = 0.05;
 const CLAW_COOLDOWN: f32 = 1.0;
 /// After a screen is destroyed, the whole horde leaves screens alone for this
-/// many seconds (they go for the player instead), so the next one doesn't fall
-/// straight after.
-const SIEGE_COOLDOWN: f32 = 8.0;
+/// many seconds (they go for the player instead). A full minute: longer than a
+/// night, so at most one screen falls per night. It keeps counting down by day.
+const SIEGE_COOLDOWN: f32 = 60.0;
 /// How far past its hitbox a zombie can claw a frame, sideways and upwards.
 /// REACH_UP = 16 means a frame floating up to one tile above a zombie's head is
 /// reachable standing; higher ones it has to leap at.
