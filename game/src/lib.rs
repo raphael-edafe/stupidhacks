@@ -27,7 +27,7 @@ use mobs::{MobCtx, Mobs};
 use particles::Particles;
 use player::Player;
 use screens::Screens;
-use shared::{GameApi, GameEvent, InputState, Key, ScreenId, ScreenInfo};
+use shared::{GameApi, GameEvent, InputState, Key, ScreenId, ScreenInfo, FAR_H, FAR_W, VIEW_H, VIEW_W};
 use sky::Sky;
 use sprites::Sprites;
 use world::World;
@@ -104,6 +104,18 @@ impl GameApi for Game {
         let busy = self.screens.update(dt, &ctl, &mut self.cam, &mut self.world, &mut self.particles, &mut self.events, self.player.center());
         // Modal UI (chooser, zoom): the player stands still and can't mine/place.
         let player_ctl = if busy.frozen { ctl.frozen() } else { ctl };
+
+        // World zoom: wheel / `-` `=` switch between the close and far view.
+        // (While a modal UI is up the wheel belongs to it.)
+        if !busy.frozen {
+            let far = ctl.cur.wheel < 0.0 || ctl.pressed(Key::ZoomOut);
+            let close = ctl.cur.wheel > 0.0 || ctl.pressed(Key::ZoomIn);
+            if far && self.cam.vw < FAR_W as f32 {
+                self.cam.set_view(FAR_W, FAR_H);
+            } else if close && self.cam.vw > VIEW_W as f32 {
+                self.cam.set_view(VIEW_W, VIEW_H);
+            }
+        }
         self.player.update(dt, &player_ctl, &mut self.cam, &mut self.world, &mut self.particles, busy.mouse || busy.frozen);
 
         let mut ctx = MobCtx {
@@ -123,7 +135,8 @@ impl GameApi for Game {
     }
 
     fn draw_world(&mut self, rgba_buf: &mut [u8]) {
-        let mut c = Canvas::new(rgba_buf);
+        let (w, h) = self.view_size();
+        let mut c = Canvas::new(rgba_buf, w, h);
         self.sky.draw(&mut c, &self.cam, &self.world);
         render::draw_tiles(&mut c, &self.world, &self.sprites, &self.cam);
         self.screens.draw_world(&mut c, &self.cam);
@@ -133,7 +146,8 @@ impl GameApi for Game {
     }
 
     fn draw_fx(&mut self, rgba_buf: &mut [u8]) {
-        let mut c = Canvas::new(rgba_buf);
+        let (w, h) = self.view_size();
+        let mut c = Canvas::new(rgba_buf, w, h);
         c.clear(rgba(0, 0, 0, 0));
         self.screens.draw_fx(&mut c, &self.cam, &self.world, self.hud_visible || self.sky.is_night());
         self.mobs.draw(&mut c, &self.cam, &self.light);
@@ -159,6 +173,10 @@ impl GameApi for Game {
     fn drain_events(&mut self) -> Vec<GameEvent> {
         std::mem::take(&mut self.events)
     }
+
+    fn view_size(&self) -> (u32, u32) {
+        (self.cam.vw as u32, self.cam.vh as u32)
+    }
 }
 
 #[cfg(test)]
@@ -172,6 +190,25 @@ mod tests {
         for _ in 0..n {
             g.update(1.0 / 60.0, &input);
         }
+    }
+
+    #[test]
+    fn wheel_and_keys_switch_world_zoom() {
+        let mut g = Game::new(DEFAULT_SEED);
+        assert_eq!(g.view_size(), (VIEW_W, VIEW_H));
+        let mut input = InputState::default();
+        input.game_focused = true;
+        input.wheel = -1.0;
+        g.update(1.0 / 60.0, &input);
+        assert_eq!(g.view_size(), (FAR_W, FAR_H));
+        // Drawing at the far size uses the bigger buffers.
+        let mut a = vec![0u8; (FAR_W * FAR_H * 4) as usize];
+        g.draw_world(&mut a);
+        g.draw_fx(&mut a);
+        input.wheel = 0.0;
+        input.set(Key::ZoomIn, true);
+        g.update(1.0 / 60.0, &input);
+        assert_eq!(g.view_size(), (VIEW_W, VIEW_H));
     }
 
     #[test]

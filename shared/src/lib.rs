@@ -3,17 +3,22 @@
 //! Keep this crate tiny and dependency-free. Changing it breaks the other
 //! person's build, so agree on changes first.
 //!
-//! Coordinates: everything here is in *view pixels*. The game renders a
-//! VIEW_W x VIEW_H image; the compositor scales it up by SCALE with nearest
-//! filtering. One view pixel = SCALE output pixels.
+//! Coordinates: everything here is in *view pixels*. The game renders an image
+//! of `GameApi::view_size()` (640x360 "close" or 960x540 "far" zoom); the
+//! compositor scales it to the output with nearest filtering.
 
+/// "Close" view size (3x pixels at 1080p).
 pub const VIEW_W: u32 = 640;
 pub const VIEW_H: u32 = 360;
+/// "Far" (zoomed-out) view size (2x pixels at 1080p).
+pub const FAR_W: u32 = 960;
+pub const FAR_H: u32 = 540;
 pub const SCALE: u32 = 3;
 pub const OUTPUT_W: u32 = VIEW_W * SCALE; // 1920
 pub const OUTPUT_H: u32 = VIEW_H * SCALE; // 1080
 
-/// Bytes in one RGBA8 layer buffer (row-major, top-left origin, straight alpha).
+/// Bytes in one RGBA8 layer buffer at the close view size
+/// (row-major, top-left origin, straight alpha). Use `view_size()` for the live size.
 pub const LAYER_BYTES: usize = (VIEW_W * VIEW_H * 4) as usize;
 
 pub type ScreenId = u32;
@@ -69,6 +74,16 @@ pub enum Key {
     Hotbar4,
     Hotbar5,
     Hotbar6,
+    /// Enter: confirm (launcher).
+    Enter,
+    /// Backspace: delete a character (launcher search).
+    Backspace,
+    /// Q: hold near a screen to smash it.
+    Smash,
+    /// `=`: zoom the world in (close view).
+    ZoomIn,
+    /// `-`: zoom the world out (far view).
+    ZoomOut,
 }
 
 /// Snapshot of input for one tick. Edge detection ("pressed this frame") is
@@ -81,6 +96,9 @@ pub struct InputState {
     pub mouse_y: f32,
     pub lmb: bool,
     pub rmb: bool,
+    /// Mouse wheel notches this tick (positive = up / away from the user).
+    /// Only sent while the pointer is over the world, not over a window.
+    pub wheel: f32,
     /// False while an app window has keyboard focus: the game must ignore
     /// keys and mouse buttons (but keep simulating).
     pub game_focused: bool,
@@ -133,6 +151,21 @@ pub enum GameEvent {
     ScreenDestroyed { id: ScreenId },
 }
 
+/// One launchable app, as the game sees it. The compositor keeps the matching
+/// command line; `GameEvent::LaunchApp { app }` is an index into the catalog
+/// passed to `GameApi::set_app_catalog`.
+#[derive(Clone, Debug, Default)]
+pub struct AppInfo {
+    /// Desktop file id, e.g. "firefox_firefox" or "org.gnome.Nautilus".
+    pub id: String,
+    pub name: String,
+    /// 16x16 straight-alpha RGBA icon, if one was found.
+    pub icon: Option<Vec<u8>>,
+    /// Pinned favourite (shown when the search box is empty), in this order.
+    pub favourite: Option<u8>,
+}
+
+/// Fallback app list until a catalog is supplied (and for tests).
 /// Apps offered in the in-game chooser. `command` is run by the compositor
 /// with WAYLAND_DISPLAY pointing at the nested compositor.
 #[derive(Clone, Copy, Debug)]
@@ -166,4 +199,19 @@ pub trait GameApi {
     fn set_screen_occupied(&mut self, id: ScreenId, occupied: bool);
     /// Events since the last call.
     fn drain_events(&mut self) -> Vec<GameEvent>;
+
+    /// Current view size in view pixels: (VIEW_W, VIEW_H) or (FAR_W, FAR_H).
+    /// Layer buffers passed to draw_* must be `w * h * 4` bytes.
+    fn view_size(&self) -> (u32, u32) {
+        (VIEW_W, VIEW_H)
+    }
+    /// The installed apps the launcher offers. Indices are used by `LaunchApp`.
+    fn set_app_catalog(&mut self, _apps: Vec<AppInfo>) {}
+    /// True while a text field (launcher search) wants typed characters.
+    /// The compositor then sends text via `text_input` instead of game keys
+    /// (Esc/Enter/Backspace/arrows still arrive as keys).
+    fn wants_text(&self) -> bool {
+        false
+    }
+    fn text_input(&mut self, _text: &str) {}
 }

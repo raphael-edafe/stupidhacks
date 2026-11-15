@@ -53,10 +53,11 @@ pub struct ViewXform {
 }
 
 impl ViewXform {
-    pub fn for_output(w: i32, h: i32) -> Self {
-        let scale = (w as f64 / VIEW_W as f64).min(h as f64 / VIEW_H as f64).max(0.1);
-        let ox = (w as f64 - VIEW_W as f64 * scale) / 2.0;
-        let oy = (h as f64 - VIEW_H as f64 * scale) / 2.0;
+    /// Fit a `vw x vh` game view into a `w x h` output (uniform scale, letterboxed).
+    pub fn for_output(w: i32, h: i32, vw: u32, vh: u32) -> Self {
+        let scale = (w as f64 / vw as f64).min(h as f64 / vh as f64).max(0.1);
+        let ox = (w as f64 - vw as f64 * scale) / 2.0;
+        let oy = (h as f64 - vh as f64 * scale) / 2.0;
         ViewXform { scale, ox, oy }
     }
 
@@ -166,7 +167,7 @@ impl Siege {
             input,
             escape_pulse: false,
             screens: Vec::new(),
-            view: ViewXform::for_output(1920, 1080),
+            view: ViewXform::for_output(1920, 1080, VIEW_W, VIEW_H),
             opts,
             frame: 0,
             autopick: None,
@@ -224,6 +225,7 @@ impl Siege {
             }
         }
         self.game.update(dt, &input);
+        self.input.wheel = 0.0;
 
         for ev in self.game.drain_events() {
             self.handle_game_event(ev);
@@ -544,7 +546,7 @@ impl Siege {
     }
 }
 
-pub const ALL_KEYS: [Key; 20] = [
+pub const ALL_KEYS: [Key; 25] = [
     Key::Left,
     Key::Right,
     Key::Up,
@@ -565,6 +567,11 @@ pub const ALL_KEYS: [Key; 20] = [
     Key::Hotbar4,
     Key::Hotbar5,
     Key::Hotbar6,
+    Key::Enter,
+    Key::Backspace,
+    Key::Smash,
+    Key::ZoomIn,
+    Key::ZoomOut,
 ];
 
 /// The client's xdg_toplevel min size (0 = unconstrained).

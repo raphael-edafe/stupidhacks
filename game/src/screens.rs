@@ -32,6 +32,11 @@ const DYING_TIME: f32 = 0.9;
 pub const ZOOM_TIME: f32 = 0.35;
 /// Window rect when fully zoomed: 8 px margin, 16 px at the bottom for the hint bar.
 pub const ZOOM_RECT: Rect = Rect { x: 8, y: 8, w: VIEW_W as i32 - 16, h: VIEW_H as i32 - 24 };
+
+/// Zoomed-in window rect for a given view size (ZOOM_RECT at the close size).
+pub fn zoom_rect_for(vw: f32, vh: f32) -> Rect {
+    Rect { x: 8, y: 8, w: vw as i32 - 16, h: vh as i32 - 24 }
+}
 /// Prompts appear within this distance (world px) of a screen's frame.
 pub const PROMPT_RANGE: f32 = 3.0 * TILE as f32;
 const CHOOSER_POP: f32 = 0.26;
@@ -365,15 +370,16 @@ impl Screens {
         }
         let l = |a: i32, b: i32| (a as f32 + (b - a) as f32 * z).round() as i32;
         let (ox, oy) = if z >= 1.0 { s.shake_offset() } else { (0, 0) };
-        Rect { x: l(x, ZOOM_RECT.x) + ox, y: l(y, ZOOM_RECT.y) + oy, w: l(w, ZOOM_RECT.w), h: l(h, ZOOM_RECT.h) }
+        let zr = zoom_rect_for(cam.vw, cam.vh);
+        Rect { x: l(x, zr.x) + ox, y: l(y, zr.y) + oy, w: l(w, zr.w), h: l(h, zr.h) }
     }
 
     /// Chooser panel rect (view px): centred on the screen's interior, kept in view.
     fn chooser_rect(&self, s: &Screen, cam: &Camera) -> (i32, i32, i32, i32) {
         let (x, y, w, h) = s.interior_view(cam);
         let (pw, ph) = (ui::PANEL_W, ui::panel_h());
-        let px = (x + w / 2 - pw / 2).clamp(4, VIEW_W as i32 - 4 - pw);
-        let py = (y + h / 2 - ph / 2).clamp(4, VIEW_H as i32 - 4 - ph);
+        let px = (x + w / 2 - pw / 2).clamp(4, (cam.vw as i32 - 4 - pw).max(4));
+        let py = (y + h / 2 - ph / 2).clamp(4, (cam.vh as i32 - 4 - ph).max(4));
         (px, py, pw, ph)
     }
 
@@ -983,7 +989,7 @@ impl Screens {
         }
         let ly = if vy - 10 < 2 { vy + 3 } else { vy - 10 };
         let lw = text_width(&label, 1);
-        let lx = vx.clamp(3, (VIEW_W as i32 - lw - 4).max(3));
+        let lx = vx.clamp(3, (c.w - lw - 4).max(3));
         c.fill_rect(lx - 2, ly - 2, lw + 5, 9, rgba(10, 12, 20, (150.0 * fade) as u8));
         c.text_shadow(lx, ly, &label, 1, ui::fade(base, fade));
     }

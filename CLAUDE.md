@@ -14,11 +14,11 @@ Art must be original or CC0. Terraria-like gameplay is fine, but no Terraria ass
 
 ## Ownership (avoid merge conflicts)
 
-Both people are currently on the game, split by module. Only edit files you own. Whoever finishes first picks up the compositor, which is the riskiest piece.
+Only edit files you own.
 
-- **B1 (game core):** `game/src/{lib,world,sprites,render,player,screens,particles,camera,input,gfx}.rs` and `game/src/bin/preview.rs`.
-- **B2 (night and atmosphere):** `game/src/{sky,light,mobs,hud}.rs`. These started as working stubs with fixed signatures and a TODO list at the top of each file. Flesh them out without changing how `lib.rs` calls them. If B2 needs a new hook in a B1 file (say, a new `Player` method), ask B1 or add it in a small, separate commit.
-- **Compositor (`compositor/`), unowned:** Smithay (based on the `smallvil` example), winit nested backend, window ↔ screen binding, input routing, launching and closing apps.
+- **B1 (this session: game core, world rendering, compositor):** everything in `game/` and `compositor/` except the two B2 files below. That includes `sky.rs` and `light.rs` (taken over from B2 in round 3), sprites/world/render, screens/ui, player, and the preview.
+- **B2 (friend: mobs and HUD):** `game/src/mobs.rs` and `game/src/hud.rs` only. Draw using `c.w`/`c.h`, because the view size is dynamic: 640x360 close or 960x540 far (`GameApi::view_size()`, `Camera::vw/vh`). The mob sprites are ready: `sprites.mob_crawler` (4 frames, 20x14, faces right) and `sprites.mob_bat` (3 frames, 18x12).
+- **Compositor (`compositor/`), B1:** Smithay (based on the `smallvil` example), winit nested backend, window ↔ screen binding, input routing, launching and closing apps.
 - **`shared/` is the contract** (`shared/src/lib.rs`: `GameApi`, `InputState`, `ScreenInfo`, `GameEvent`). Both people must agree before changing it. Keep it dependency-free.
 
 The game crate has **no Smithay dependency**. Iterate in the standalone `preview` binary. Commit small and often, and pull before pushing.

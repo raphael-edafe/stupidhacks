@@ -1,7 +1,6 @@
-//! Software pixel drawing on a VIEW_W x VIEW_H RGBA8 buffer (straight alpha).
+//! Software pixel drawing on a w x h RGBA8 buffer (straight alpha).
 //! Everything is in view pixels; callers convert world -> view via the camera.
 
-use shared::{VIEW_H, VIEW_W};
 
 pub type Rgba = [u8; 4];
 
@@ -35,9 +34,9 @@ pub struct Canvas<'a> {
 }
 
 impl<'a> Canvas<'a> {
-    pub fn new(px: &'a mut [u8]) -> Self {
-        debug_assert_eq!(px.len(), shared::LAYER_BYTES);
-        Canvas { px, w: VIEW_W as i32, h: VIEW_H as i32 }
+    pub fn new(px: &'a mut [u8], w: u32, h: u32) -> Self {
+        debug_assert_eq!(px.len(), (w * h * 4) as usize);
+        Canvas { px, w: w as i32, h: h as i32 }
     }
 
     pub fn clear(&mut self, c: Rgba) {

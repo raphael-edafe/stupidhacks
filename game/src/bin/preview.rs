@@ -100,8 +100,8 @@ fn fake_lines(app: usize, t: f32) -> Vec<String> {
 }
 
 /// Draw a fake app window into the composited RGBA buffer (view resolution), at `s.rect`.
-fn draw_fake_window(buf: &mut [u8], s: &ScreenInfo, app: usize, t: f32) {
-    let mut c = game::gfx::Canvas::new(buf);
+fn draw_fake_window(buf: &mut [u8], vw: u32, vh: u32, s: &ScreenInfo, app: usize, t: f32) {
+    let mut c = game::gfx::Canvas::new(buf, vw, vh);
     let r = s.rect;
     if r.w < 8 || r.h < 8 {
         return;
@@ -184,7 +184,13 @@ fn draw_fake_window(buf: &mut [u8], s: &ScreenInfo, app: usize, t: f32) {
 }
 
 /// Composite world + windows + fx into one RGBA image (view resolution).
-fn composite(g: &mut Game, fake: &FakeCompositor, world: &mut [u8], fx: &mut [u8], out: &mut [u8], t: f32) {
+/// Buffers are resized to the game's current view size.
+fn composite(g: &mut Game, fake: &FakeCompositor, world: &mut Vec<u8>, fx: &mut Vec<u8>, out: &mut Vec<u8>, t: f32) {
+    let (vw, vh) = g.view_size();
+    let n = (vw * vh * 4) as usize;
+    for b in [&mut *world, &mut *fx, &mut *out] {
+        b.resize(n, 0);
+    }
     g.draw_world(world);
     g.draw_fx(fx);
     out.copy_from_slice(world);
@@ -193,14 +199,14 @@ fn composite(g: &mut Game, fake: &FakeCompositor, world: &mut [u8], fx: &mut [u8
     infos.sort_by(|a, b| a.zoom.total_cmp(&b.zoom));
     for s in infos {
         if let Some(&app) = fake.windows.get(&s.id) {
-            draw_fake_window(out, &s, app, t);
+            draw_fake_window(out, vw, vh, &s, app, t);
         }
     }
-    let mut c = game::gfx::Canvas::new(out);
+    let mut c = game::gfx::Canvas::new(out, vw, vh);
     for (i, p) in fx.chunks_exact(4).enumerate() {
         if p[3] > 0 {
-            let x = (i % VIEW_W as usize) as i32;
-            let y = (i / VIEW_W as usize) as i32;
+            let x = (i % vw as usize) as i32;
+            let y = (i / vw as usize) as i32;
             c.blend(x, y, [p[0], p[1], p[2], p[3]]);
         }
     }
@@ -285,10 +291,13 @@ fn interactive(seed: u64, scale: usize) {
         if escape_tick {
             input.set(Key::Escape, true);
         }
+        let (vw, vh) = g.view_size();
         if let Some((mx, my)) = window.get_mouse_pos(MouseMode::Pass) {
-            input.mouse_x = mx / scale as f32;
-            input.mouse_y = my / scale as f32;
+            input.mouse_x = mx * vw as f32 / w as f32;
+            input.mouse_y = my * vh as f32 / h as f32;
         }
+        // Mouse wheel: notches this frame (consumed by one tick below).
+        input.wheel = window.get_scroll_wheel().map(|(_, dy)| dy.signum()).unwrap_or(0.0);
         input.lmb = window.get_mouse_down(MouseButton::Left);
         input.rmb = window.get_mouse_down(MouseButton::Right);
 
@@ -297,6 +306,7 @@ fn interactive(seed: u64, scale: usize) {
         last = now;
         while acc >= DT {
             g.update(DT, &input);
+            input.wheel = 0.0;
             if escape_tick {
                 escape_tick = false;
                 input.set(Key::Escape, false);
@@ -308,13 +318,16 @@ fn interactive(seed: u64, scale: usize) {
         }
 
         composite(&mut g, &fake, &mut world, &mut fx, &mut out, t);
-        // Nearest-neighbour upscale into the window buffer.
+        // Nearest-neighbour scale of the current view into the window buffer.
+        let (vw, vh) = g.view_size();
+        let (vw, vh) = (vw as usize, vh as usize);
         for y in 0..h {
-            let sy = y / scale;
-            let row = &out[sy * VIEW_W as usize * 4..(sy + 1) * VIEW_W as usize * 4];
+            let sy = (y * vh / h).min(vh - 1);
+            let row = &out[sy * vw * 4..(sy + 1) * vw * 4];
             let dst = &mut frame[y * w..(y + 1) * w];
             for (x, d) in dst.iter_mut().enumerate() {
-                let p = &row[(x / scale) * 4..(x / scale) * 4 + 4];
+                let sx = (x * vw / w).min(vw - 1);
+                let p = &row[sx * 4..sx * 4 + 4];
                 *d = (p[0] as u32) << 16 | (p[1] as u32) << 8 | p[2] as u32;
             }
         }
@@ -475,7 +488,9 @@ fn headless(seed: u64, dir: &str) {
             draw_time += start.elapsed();
             draws += 1;
             let path = format!("{dir}/{}.png", shots[next_shot].1);
-            match write_png(&path, &out, 2) {
+            let (vw, vh) = g.view_size();
+            let sc = 2;
+            match write_png(&path, &out, vw as usize, vh as usize, sc) {
                 Ok(()) => println!("wrote {path}"),
                 Err(e) => eprintln!("failed {path}: {e}"),
             }
@@ -497,8 +512,7 @@ fn headless(seed: u64, dir: &str) {
     );
 }
 
-fn write_png(path: &str, rgba: &[u8], scale: usize) -> Result<(), Box<dyn std::error::Error>> {
-    let (w, h) = (VIEW_W as usize, VIEW_H as usize);
+fn write_png(path: &str, rgba: &[u8], w: usize, h: usize, scale: usize) -> Result<(), Box<dyn std::error::Error>> {
     let mut big = vec![0u8; w * h * 4 * scale * scale];
     for y in 0..h * scale {
         for x in 0..w * scale {

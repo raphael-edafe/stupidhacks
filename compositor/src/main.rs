@@ -44,6 +44,10 @@ use smithay::{
 use tracing::{error, info, warn};
 
 use shared::{GameApi, LAYER_BYTES, VIEW_H, VIEW_W};
+
+fn mk_layer(w: u32, h: u32) -> MemoryRenderBuffer {
+    MemoryRenderBuffer::new(Fourcc::Abgr8888, (w as i32, h as i32), 1, Transform::Normal, None)
+}
 use state::{Options, Siege, ViewXform};
 
 smithay::backend::renderer::element::render_elements! {
@@ -65,6 +69,8 @@ struct Frame {
     fx_buf: MemoryRenderBuffer,
     world_px: Vec<u8>,
     fx_px: Vec<u8>,
+    /// Size the layer buffers currently have (follows `game.view_size()`).
+    layer_size: (u32, u32),
     last: Instant,
     acc: f32,
     fps_frames: u32,
@@ -134,7 +140,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let _global = output.create_global::<Siege>(&data.display_handle);
     output.change_current_state(Some(mode), Some(Transform::Flipped180), None, Some((0, 0).into()));
     output.set_preferred(mode);
-    data.state.view = ViewXform::for_output(size.w, size.h);
+    data.state.view = ViewXform::for_output(size.w, size.h, VIEW_W, VIEW_H);
 
     // Crisp pixel art.
     if let Err(e) = backend.renderer().upscale_filter(TextureFilter::Nearest) {
@@ -145,15 +151,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     info!("listening on WAYLAND_DISPLAY={:?}", data.state.socket_name);
 
     let damage = OutputDamageTracker::from_output(&output);
-    let mk_buf = || MemoryRenderBuffer::new(Fourcc::Abgr8888, (VIEW_W as i32, VIEW_H as i32), 1, Transform::Normal, None);
     let frame = std::rc::Rc::new(std::cell::RefCell::new(Frame {
         backend,
         output: output.clone(),
         damage,
-        world_buf: mk_buf(),
-        fx_buf: mk_buf(),
+        world_buf: mk_layer(VIEW_W, VIEW_H),
+        fx_buf: mk_layer(VIEW_W, VIEW_H),
         world_px: vec![0; LAYER_BYTES],
         fx_px: vec![0; LAYER_BYTES],
+        layer_size: (VIEW_W, VIEW_H),
         last: Instant::now(),
         acc: 0.0,
         fps_frames: 0,
@@ -167,7 +173,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         match event {
             WinitEvent::Resized { size, .. } => {
                 f.output.change_current_state(Some(Mode { size, refresh: 60_000 }), None, None, None);
-                data.state.view = ViewXform::for_output(size.w, size.h);
             }
             WinitEvent::Input(ev) => {
                 let s = f.backend.window_size();
@@ -224,12 +229,22 @@ fn render_frame(f: &mut Frame, st: &mut Siege) {
 
     let t_sim = now.elapsed();
     // --- game layers ---
+    // Follow the game's view size (world zoom): resize buffers, refit the view.
+    let (vw, vh) = st.game.view_size();
+    if f.layer_size != (vw, vh) {
+        f.world_buf = mk_layer(vw, vh);
+        f.fx_buf = mk_layer(vw, vh);
+        f.world_px = vec![0; (vw * vh * 4) as usize];
+        f.fx_px = vec![0; (vw * vh * 4) as usize];
+        f.layer_size = (vw, vh);
+    }
+    st.view = ViewXform::for_output(ow, oh, vw, vh);
     st.game.draw_world(&mut f.world_px);
     st.game.draw_fx(&mut f.fx_px);
     let world_px = &f.world_px;
     let _ = f.world_buf.render().draw(|mem| {
         mem.copy_from_slice(world_px);
-        Ok::<_, ()>(vec![Rectangle::from_size((VIEW_W as i32, VIEW_H as i32).into())])
+        Ok::<_, ()>(vec![Rectangle::from_size((vw as i32, vh as i32).into())])
     });
     let fx_px = &f.fx_px;
     let _ = f.fx_buf.render().draw(|mem| {
@@ -241,16 +256,16 @@ fn render_frame(f: &mut Frame, st: &mut Siege) {
             d[2] = ((s[2] as u32 * a + 127) / 255) as u8;
             d[3] = s[3];
         }
-        Ok::<_, ()>(vec![Rectangle::from_size((VIEW_W as i32, VIEW_H as i32).into())])
+        Ok::<_, ()>(vec![Rectangle::from_size((vw as i32, vh as i32).into())])
     });
 
     let t_draw = now.elapsed();
     let view = st.view;
     let layer_loc = Point::<f64, smithay::utils::Physical>::from((view.ox, view.oy));
     let layer_size: Size<i32, smithay::utils::Logical> =
-        ((VIEW_W as f64 * view.scale).round() as i32, (VIEW_H as f64 * view.scale).round() as i32).into();
+        ((vw as f64 * view.scale).round() as i32, (vh as f64 * view.scale).round() as i32).into();
 
-    let layer_src: Rectangle<f64, smithay::utils::Logical> = Rectangle::from_size((VIEW_W as f64, VIEW_H as f64).into());
+    let layer_src: Rectangle<f64, smithay::utils::Logical> = Rectangle::from_size((vw as f64, vh as f64).into());
     let order = st.draw_order();
     let t = st.start_time.elapsed().as_secs_f32();
 

@@ -3,6 +3,7 @@
 use crate::world::World;
 use shared::{VIEW_H, VIEW_W};
 
+
 pub struct Camera {
     /// Top-left of the view in world pixels.
     pub x: f32,
@@ -12,6 +13,9 @@ pub struct Camera {
     time: f32,
     /// Integer shake offset for this frame (view px).
     off: (i32, i32),
+    /// Current view size (view px): close 640x360 or far 960x540.
+    pub vw: f32,
+    pub vh: f32,
 }
 
 impl Camera {
@@ -22,7 +26,18 @@ impl Camera {
             trauma: 0.0,
             time: 0.0,
             off: (0, 0),
+            vw: VIEW_W as f32,
+            vh: VIEW_H as f32,
         }
+    }
+
+    /// Change the view size, keeping the same world point at the centre.
+    pub fn set_view(&mut self, w: u32, h: u32) {
+        let (cx, cy) = (self.x + self.vw / 2.0, self.y + self.vh / 2.0);
+        self.vw = w as f32;
+        self.vh = h as f32;
+        self.x = cx - self.vw / 2.0;
+        self.y = cy - self.vh / 2.0;
     }
 
     pub fn kick(&mut self, amount: f32) {
@@ -31,13 +46,13 @@ impl Camera {
 
     /// Ease towards centring (cx, cy), clamped to the world.
     pub fn follow(&mut self, cx: f32, cy: f32, dt: f32, world: &World) {
-        let tx = cx - VIEW_W as f32 / 2.0;
-        let ty = cy - VIEW_H as f32 / 2.0 - 20.0; // see a bit more above the player
+        let tx = cx - self.vw / 2.0;
+        let ty = cy - self.vh / 2.0 - 20.0; // see a bit more above the player
         let k = 1.0 - (-6.0 * dt).exp();
         self.x += (tx - self.x) * k;
         self.y += (ty - self.y) * k;
-        self.x = self.x.clamp(0.0, world.width_px() - VIEW_W as f32);
-        self.y = self.y.clamp(0.0, world.height_px() - VIEW_H as f32);
+        self.x = self.x.clamp(0.0, (world.width_px() - self.vw).max(0.0));
+        self.y = self.y.clamp(0.0, (world.height_px() - self.vh).max(0.0));
 
         self.time += dt;
         self.trauma = (self.trauma - dt * 1.5).max(0.0);

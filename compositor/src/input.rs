@@ -49,6 +49,11 @@ fn map_key(code: u32) -> Option<Key> {
         5 => Key::Hotbar4,
         6 => Key::Hotbar5,
         7 => Key::Hotbar6,
+        28 | 96 => Key::Enter,  // Enter, keypad Enter
+        14 => Key::Backspace,
+        16 => Key::Smash,       // Q
+        12 => Key::ZoomOut,     // -
+        13 => Key::ZoomIn,      // =
         _ => return None,
     })
 }
@@ -156,6 +161,14 @@ impl Siege {
                     if event.amount(Axis::Vertical) == Some(0.0) {
                         frame = frame.stop(Axis::Vertical);
                     }
+                }
+                // Over the world (no window under the pointer): the wheel zooms the game.
+                let pos = pointer.current_location();
+                if self.surface_under(pos, out_size.0, out_size.1).is_none() {
+                    if v != 0.0 {
+                        self.input.wheel -= v.signum() as f32; // wayland: positive = down
+                    }
+                    return;
                 }
                 pointer.axis(self, frame);
                 pointer.frame(self);
