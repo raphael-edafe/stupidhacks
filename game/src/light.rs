@@ -2,7 +2,9 @@
 //!
 //! Sources:
 //! - sky light (scaled by daylight, a little blue at night) down every open
-//!   column until the first solid tile,
+//!   column, plus an ambient floor underground that fades gently with depth
+//!   (so the dirt and stone layers stay readable, as before, and get darker
+//!   the deeper you go),
 //! - torches (warm, reach about 8 tiles),
 //! - crystal ore (faint cyan),
 //! - online screens (a cool glow around their frames).
@@ -28,6 +30,11 @@ const FALL_SOLID: f32 = 0.30;
 const TORCH: [f32; 3] = [1.0, 0.80, 0.50];
 const CRYSTAL: [f32; 3] = [0.30, 0.62, 0.75];
 const SCREEN: [f32; 3] = [0.52, 0.68, 0.88];
+/// Underground ambient: full sky light down to this many tiles below the original
+/// surface, then fading per tile to a floor.
+const DEPTH_FULL: i32 = 3;
+const DEPTH_FADE: f32 = 0.035;
+const DEPTH_FLOOR: f32 = 0.65;
 
 pub struct Light {
     /// Sky level (0..1) from daylight.
@@ -73,13 +80,17 @@ impl Light {
         // Tiles: solidity, sky down open columns, torches and crystals.
         for i in 0..gw {
             let x = gx + i;
-            let open_to = world.ground_y(x.clamp(0, world.w - 1));
+            let col = x.clamp(0, world.w - 1);
+            let open_to = world.ground_y(col);
+            let surface = world.surface[col as usize];
             for j in 0..gh {
                 let y = gy + j;
                 let k = (j * gw + i) as usize;
                 let t = world.get(x, y);
                 self.solid[k] = t.solid();
-                let mut l = if y < open_to { sky } else { [0.0; 3] };
+                let depth = y - surface;
+                let f = if y < open_to || depth <= DEPTH_FULL { 1.0 } else { (1.0 - (depth - DEPTH_FULL) as f32 * DEPTH_FADE).max(DEPTH_FLOOR) };
+                let mut l = [sky[0] * f, sky[1] * f, sky[2] * f];
                 let src = match t {
                     Tile::Torch => Some(TORCH),
                     Tile::Crystal => Some(CRYSTAL),
