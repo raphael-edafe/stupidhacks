@@ -368,9 +368,12 @@ impl Critters {
 
         // --- ground critters ---
         let online = ctx.screens.targets();
+        // Every screen frame (building, online or dying) is a wall to animals,
+        // so they never wander into a screen's dug-out pit or over its window.
+        let walls: Vec<(f32, f32, f32, f32)> = ctx.screens.list.iter().map(|s| s.frame_px()).collect();
         let Critters { list, rng, .. } = self;
         for cr in list.iter_mut() {
-            update_critter(cr, dt, ctx, &online, dusk, rng);
+            update_critter(cr, dt, ctx, &online, &walls, dusk, rng);
             let (cx, _) = cr.body.center();
             if (cx - pcx).abs() > RANGE_VIEWS * vw || cr.body.y > ctx.world.height_px() {
                 cr.gone = true;
@@ -387,7 +390,7 @@ impl Critters {
 
         // --- fireflies ---
         self.glow = ((DUSK - daylight) / 0.3).clamp(0.0, 1.0);
-        self.update_fireflies(dt, ctx);
+        self.update_fireflies(dt, ctx, &walls);
     }
 
     fn update_birds(&mut self, dt: f32, ctx: &mut MobCtx, online: &[(ScreenId, (f32, f32, f32, f32))], dusk: bool, threats: &[(f32, f32)]) {
@@ -531,7 +534,7 @@ impl Critters {
         Some(pool[i])
     }
 
-    fn update_fireflies(&mut self, dt: f32, ctx: &mut MobCtx) {
+    fn update_fireflies(&mut self, dt: f32, ctx: &mut MobCtx, walls: &[(f32, f32, f32, f32)]) {
         if self.glow <= 0.0 {
             self.flies.clear();
             return;
@@ -543,7 +546,8 @@ impl Critters {
             f.x += (t * 0.8 + f.phase).sin() * 12.0 * dt;
             f.y += (t * 1.1 + f.phase * 1.7).cos() * 7.0 * dt;
         }
-        self.flies.retain(|f| f.x > cx - 30.0 && f.x < cx + cw + 30.0 && f.y > cy - 30.0 && f.y < cy + ch + 30.0 && !world.solid_px(f.x, f.y));
+        let in_frame = |x: f32, y: f32| walls.iter().any(|&(fx, fy, fw, fh)| x >= fx && x < fx + fw && y >= fy && y < fy + fh);
+        self.flies.retain(|f| f.x > cx - 30.0 && f.x < cx + cw + 30.0 && f.y > cy - 30.0 && f.y < cy + ch + 30.0 && !world.solid_px(f.x, f.y) && !in_frame(f.x, f.y));
         let mut tries = 0;
         while self.flies.len() < FIREFLIES && tries < 40 {
             tries += 1;
@@ -554,7 +558,7 @@ impl Critters {
             }
             let ground = (world.ground_y(col) * TILE) as f32;
             let y = ground - 6.0 - 48.0 * self.rng.next();
-            if y < cy || y > cy + ch || world.solid_px(x, y) {
+            if y < cy || y > cy + ch || world.solid_px(x, y) || in_frame(x, y) {
                 continue;
             }
             self.flies.push(Firefly { x, y, phase: self.rng.next() * 6.28 });
@@ -610,7 +614,7 @@ impl Critters {
                 let (vx, vy) = cam.to_view(f.x, f.y);
                 let pulse = ((self.t * 2.6 + f.phase).sin() * 0.5 + 0.5).powi(2);
                 let a = self.glow * (0.3 + 0.7 * pulse);
-                c.glow(vx, vy, 4, with_alpha(rgb(190, 255, 110), (a * 70.0) as u8));
+                c.glow(vx, vy, 5, with_alpha(rgb(190, 255, 110), (a * 90.0) as u8));
                 c.blend(vx, vy, with_alpha(rgb(240, 255, 170), (a * 255.0) as u8));
             }
         }
@@ -647,7 +651,15 @@ fn perch_pos(p: Perch, world: &World, online: &[(ScreenId, (f32, f32, f32, f32))
     }
 }
 
-fn update_critter(cr: &mut Critter, dt: f32, ctx: &mut MobCtx, online: &[(ScreenId, (f32, f32, f32, f32))], dusk: bool, rng: &mut Rng) {
+fn update_critter(
+    cr: &mut Critter,
+    dt: f32,
+    ctx: &mut MobCtx,
+    online: &[(ScreenId, (f32, f32, f32, f32))],
+    walls: &[(f32, f32, f32, f32)],
+    dusk: bool,
+    rng: &mut Rng,
+) {
     cr.hop_cd = (cr.hop_cd - dt).max(0.0);
     cr.poke_cd = (cr.poke_cd - dt).max(0.0);
     let (pcx, pcy) = ctx.player.center();
@@ -738,7 +750,9 @@ fn update_critter(cr: &mut Critter, dt: f32, ctx: &mut MobCtx, online: &[(Screen
             Some(&(_, (fx, fy, fw, _))) => {
                 let target = fx + fw / 2.0;
                 let dx = target - cx;
-                if dx.abs() < 10.0 && cr.body.on_ground {
+                // The frame is a wall, so leap from beside it (or from under a floating one).
+                let at_edge = cr.body.x + cr.body.w > fx - 4.0 && cr.body.x < fx + fw + 4.0;
+                if at_edge && cr.body.on_ground {
                     // Leap up onto the frame, somewhere near the middle.
                     let x1 = cr.body.x.clamp(fx + 4.0, fx + fw - cr.body.w - 4.0);
                     let y1 = fy - cr.body.h;
@@ -799,7 +813,24 @@ fn update_critter(cr: &mut Critter, dt: f32, ctx: &mut MobCtx, online: &[(Screen
     }
 
     if physics {
-        let blocked = cr.body.step(dt, world);
+        let (ox, oy) = (cr.body.x, cr.body.y);
+        let was_inside = walls.iter().any(|w| overlaps(cr.body.rect(), *w));
+        let mut blocked = cr.body.step(dt, world);
+        if !was_inside && walls.iter().any(|w| overlaps(cr.body.rect(), *w)) {
+            // Bumped into a screen: undo the move and turn round.
+            cr.body.x = ox;
+            if walls.iter().any(|w| overlaps(cr.body.rect(), *w)) {
+                cr.body.y = oy;
+                cr.body.vy = 0.0;
+            }
+            cr.body.vx = 0.0;
+            blocked = false;
+            cr.act = match cr.act {
+                Act::Walk { dir, t } => Act::Walk { dir: -dir, t },
+                Act::Flee { dir, t } => Act::Flee { dir: -dir, t },
+                a => a,
+            };
+        }
         let moving = cr.body.vx.abs() > 1.0;
         if moving {
             cr.facing = cr.body.vx.signum();
