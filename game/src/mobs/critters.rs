@@ -815,6 +815,12 @@ fn update_critter(
     if physics {
         let (ox, oy) = (cr.body.x, cr.body.y);
         let was_inside = walls.iter().any(|w| overlaps(cr.body.rect(), *w));
+        if was_inside {
+            // A screen was built around it: it scampers off (gone in a puff).
+            ctx.fx.sparkle(cx, cy, rgb(255, 255, 255), 6);
+            cr.gone = true;
+            return;
+        }
         let mut blocked = cr.body.step(dt, world);
         if !was_inside && walls.iter().any(|w| overlaps(cr.body.rect(), *w)) {
             // Bumped into a screen: undo the move and turn round.
@@ -958,6 +964,7 @@ mod tests {
                 cam: &mut g.cam,
                 sky: &g.sky,
                 events: &mut g.events,
+                arrows: &mut g.projectiles,
             };
             for _ in 0..20 {
                 if ctxless.spawn_at(Kind::Cat, x, &ctx) {

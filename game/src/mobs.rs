@@ -20,6 +20,7 @@ use crate::gfx::{rgb, rgba, shade, with_alpha, Canvas, Rgba, Sprite};
 use crate::light::Light;
 use crate::particles::{Particle, Particles};
 use crate::player::{self, Player};
+use crate::projectiles::{Projectiles, ARROW_DAMAGE};
 use crate::screens::Screens;
 use crate::sky::Sky;
 use crate::world::{Tile, World, TILE};
@@ -33,6 +34,8 @@ pub struct MobCtx<'a> {
     pub cam: &'a mut Camera,
     pub sky: &'a Sky,
     pub events: &'a mut Vec<GameEvent>,
+    /// The player's arrows (mobs take hits from them).
+    pub arrows: &'a mut Projectiles,
 }
 
 // ---------------- tuning ----------------
@@ -68,8 +71,8 @@ const SIEGE_COOLDOWN: f32 = 60.0;
 const REACH_X: f32 = 5.0;
 const REACH_UP: f32 = 16.0;
 
-/// Player damage per touch (the player has 10 HP and 0.8 s of i-frames).
-const TOUCH_DAMAGE: i32 = 1;
+/// Player damage per touch (the player has 20 HP and 0.8 s of i-frames; armour takes some off).
+const TOUCH_DAMAGE: i32 = 4;
 /// A zombie goes for the player instead of a screen when the player is this
 /// close (px) *and* closer than the nearest screen.
 const AGGRO: f32 = 48.0;
@@ -570,7 +573,7 @@ fn update_zombie(z: &mut Mob, dt: f32, ctx: &mut MobCtx, targets: &[(ScreenId, (
     let (cx, cy) = z.center();
     if let Some(sword) = ctx.player.attack_box() {
         if z.hurt <= 0.0 && overlaps(sword, z.hitbox()) {
-            z.hp -= 1;
+            z.hp -= ctx.player.attack_damage();
             z.hurt = 0.25;
             z.stun = 0.3;
             let away = if cx >= pcx { 1.0 } else { -1.0 };
@@ -580,6 +583,15 @@ fn update_zombie(z: &mut Mob, dt: f32, ctx: &mut MobCtx, targets: &[(ScreenId, (
             ctx.fx.debris(cx, cy, SKIN, 6);
             ctx.cam.kick(if z.hp <= 0 { 0.2 } else { 0.08 });
         }
+    }
+    if let Some(dir) = ctx.arrows.hit(z.hitbox()) {
+        z.hp -= ARROW_DAMAGE;
+        z.hurt = 0.25;
+        z.stun = 0.25;
+        z.vx = dir * 120.0;
+        z.vy = -100.0;
+        z.on_ground = false;
+        ctx.fx.debris(cx, cy, SKIN, 5);
     }
     if !burning {
         let body = (z.x + 1.0, z.y + 2.0, W - 2.0, H - 2.0);
@@ -924,6 +936,34 @@ mod tests {
         tick(&mut g, 20.0);
         assert!(g.mobs.list.is_empty(), "zombies rose in torchlight");
         assert!(g.mobs.bats.list.is_empty(), "bats spawned over torchlight");
+    }
+
+    #[test]
+    fn arrows_hurt_zombies() {
+        let mut g = Game::new(DEFAULT_SEED);
+        tick(&mut g, 2.0);
+        g.sky.clock = DAY_LEN + 5.0;
+        g.mobs.was_night = true;
+        g.mobs.spawn_timer = 1000.0;
+        g.player.god = true;
+        g.player.give(crate::items::Item::Bow, 1);
+        g.player.give(crate::items::Item::Arrow, 10);
+        g.player.assign(5, crate::items::Item::Bow);
+        let (pcx, _) = g.player.center();
+        raise_zombie_at(&mut g, pcx + 70.0);
+        g.mobs.list[0].state = MobState::Walking;
+        let hp0 = g.mobs.list[0].hp;
+        let mut input = InputState::default();
+        input.game_focused = true;
+        for f in 0..20 {
+            let (zx, zy) = g.mobs.list.first().map(|z| z.center()).unwrap_or((pcx + 70.0, 0.0));
+            input.mouse_x = zx - g.cam.x;
+            input.mouse_y = zy - g.cam.y;
+            input.lmb = f < 2;
+            g.update(1.0 / 60.0, &input);
+        }
+        let hp = g.mobs.list.first().map_or(0, |z| z.hp);
+        assert!(hp <= hp0 - ARROW_DAMAGE, "the arrow should have hit (hp {hp0} -> {hp})");
     }
 
     /// Raise a zombie with its left edge at world x, feet on the ground there.

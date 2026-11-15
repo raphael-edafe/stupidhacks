@@ -14,6 +14,7 @@ pub mod light;
 pub mod mobs;
 pub mod particles;
 pub mod player;
+pub mod projectiles;
 pub mod render;
 pub mod screens;
 pub mod sky;
@@ -29,6 +30,7 @@ use light::Light;
 use mobs::{MobCtx, Mobs};
 use particles::Particles;
 use player::Player;
+use projectiles::Projectiles;
 use screens::Screens;
 use shared::{GameApi, GameEvent, InputState, Key, ScreenId, ScreenInfo, FAR_H, FAR_W, VIEW_H, VIEW_W};
 use sky::Sky;
@@ -48,6 +50,7 @@ pub struct Game {
     pub light: Light,
     pub mobs: Mobs,
     pub crafting: Crafting,
+    pub projectiles: Projectiles,
     pub controls: Controls,
     pub events: Vec<GameEvent>,
     pub time: f32,
@@ -77,6 +80,7 @@ impl Game {
             light: Light::new(),
             mobs: Mobs::new(),
             crafting: Crafting::new(),
+            projectiles: Projectiles::new(),
             controls: Controls::default(),
             events: Vec::new(),
             time: 0.0,
@@ -127,6 +131,9 @@ impl GameApi for Game {
             }
         }
         self.player.update(dt, &player_ctl, &mut self.cam, &mut self.world, &mut self.particles, busy.mouse || frozen);
+        for (x, y, vx, vy) in self.player.shots.drain(..) {
+            self.projectiles.fire(x, y, vx, vy);
+        }
 
         let mut ctx = MobCtx {
             world: &self.world,
@@ -136,8 +143,10 @@ impl GameApi for Game {
             cam: &mut self.cam,
             sky: &self.sky,
             events: &mut self.events,
+            arrows: &mut self.projectiles,
         };
         self.mobs.update(dt, &mut ctx);
+        self.projectiles.update(dt, &self.world, &mut self.particles);
 
         self.particles.update(dt, &self.world);
         let (cx, cy) = self.player.center();
@@ -161,6 +170,7 @@ impl GameApi for Game {
         c.clear(rgba(0, 0, 0, 0));
         self.screens.draw_fx(&mut c, &self.cam, &self.world, self.hud_visible || self.sky.is_night());
         self.mobs.draw(&mut c, &self.cam, &self.light);
+        self.projectiles.draw(&mut c, &self.cam);
         let (px, py) = self.player.center();
         self.player.draw(&mut c, &self.cam, &self.sprites, self.light.level_at(px, py));
         self.particles.draw(&mut c, &self.cam);

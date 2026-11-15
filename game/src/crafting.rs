@@ -83,6 +83,12 @@ impl Crafting {
         ((view.0 - PANEL_W) / 2, ((view.1 - h) / 2).max(4), PANEL_W, h)
     }
 
+    /// Centre of recipe row `i` in view px (for scripts and tests).
+    pub fn row_center(i: usize, view: (i32, i32)) -> (f32, f32) {
+        let (x, y, w, _) = Self::layout(view);
+        ((x + w / 2) as f32, (y + TITLE_H + 4 + i as i32 * ROW_H + ROW_H / 2) as f32)
+    }
+
     /// One tick. `blocked`: a screen prompt or another modal UI owns E / the
     /// mouse. Returns true while the panel is open (the player is frozen).
     pub fn update(&mut self, dt: f32, ctl: &Controls, p: &mut Player, world: &World, fx: &mut Particles, view: (i32, i32), blocked: bool) -> bool {

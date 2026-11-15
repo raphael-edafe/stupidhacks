@@ -18,6 +18,7 @@ Only edit files you own.
 
 - **B1 (this session: game core, world rendering, compositor):** everything in `game/` and `compositor/` except the two B2 files below. That includes `sky.rs` and `light.rs` (taken over from B2 in round 3), sprites/world/render, screens/ui, player, and the preview.
 - **B2 (friend: mobs and HUD):** `game/src/mobs.rs`, its submodules in `game/src/mobs/` (bats, passive animals, their art) and `game/src/hud.rs`. Draw using `c.w`/`c.h`, because the view size is dynamic: 640x360 close or 960x540 far (`GameApi::view_size()`, `Camera::vw/vh`). The mob sprites are ready: `sprites.mob_crawler` (4 frames, 20x14, faces right) and `sprites.mob_bat` (3 frames, 18x12).
+- **Items, crafting, weapons, armour, lighting (built from B2's session):** new `game/src/items.rs`, `crafting.rs` and `projectiles.rs`, plus changes in `player.rs` (inventory, hotbar, weapons, armour), `light.rs` (light map), `sprites.rs` (icons, workbench, sword tiers), `world.rs` (`Tile::Workbench`), `hud.rs`, `lib.rs` and the preview script. Pull before editing any of these.
 - **Compositor (`compositor/`), B1:** Smithay (based on the `smallvil` example), winit nested backend, window ↔ screen binding, input routing, launching and closing apps.
 - **`shared/` is the contract** (`shared/src/lib.rs`: `GameApi`, `InputState`, `ScreenInfo`, `GameEvent`). Both people must agree before changing it. Keep it dependency-free.
 

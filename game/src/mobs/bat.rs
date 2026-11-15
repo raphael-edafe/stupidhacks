@@ -25,8 +25,8 @@ const BH: f32 = 8.0;
 
 /// Screen HP (0..1) a dive takes off (a zombie claw is 0.05).
 const DIVE_DAMAGE: f32 = 0.06;
-/// Player damage when a dive connects.
-const PLAYER_DAMAGE: i32 = 1;
+/// Player damage when a dive connects (the player has 20 HP).
+const PLAYER_DAMAGE: i32 = 3;
 const HP: i32 = 1;
 
 /// Cruising and diving speeds (px/s).
@@ -326,7 +326,7 @@ fn update_bat(b: &mut Bat, dt: f32, ctx: &mut MobCtx, targets: &[(ScreenId, (f32
     // Sword.
     if let Some(sword) = ctx.player.attack_box() {
         if b.hurt <= 0.0 && overlaps(sword, b.hitbox()) {
-            b.hp -= 1;
+            b.hp -= ctx.player.attack_damage();
             b.hurt = 0.25;
             let away = if b.x >= pcx { 1.0 } else { -1.0 };
             b.vx = away * 200.0;
@@ -337,6 +337,14 @@ fn update_bat(b: &mut Bat, dt: f32, ctx: &mut MobCtx, targets: &[(ScreenId, (f32
             ctx.fx.debris(b.x, b.y, BODY, 5);
             ctx.cam.kick(if b.hp <= 0 { 0.14 } else { 0.06 });
         }
+    }
+    // Arrows.
+    if let Some(dir) = ctx.arrows.hit(b.hitbox()) {
+        b.hp -= crate::projectiles::ARROW_DAMAGE;
+        b.hurt = 0.25;
+        b.vx = dir * 160.0;
+        b.vy = -80.0;
+        ctx.fx.debris(b.x, b.y, BODY, 5);
     }
 }
 
