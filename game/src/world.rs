@@ -81,6 +81,75 @@ impl Tile {
     }
 }
 
+/// Tree designs. Each has a canopy sprite, trunk segments and a root flare (see `Sprites`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum TreeKind {
+    Oak = 0,
+    Pine,
+    Blossom,
+    Autumn,
+}
+
+impl TreeKind {
+    pub const COUNT: usize = 4;
+}
+
+/// A tree placed by worldgen. Its trunk is `Tile::Log` cells from `base_y - 1` up to `top_y`
+/// in column `x` (choppable); the canopy is a sprite drawn while the top log still exists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Tree {
+    pub x: i32,
+    /// Row of the grass tile the tree stands on.
+    pub base_y: i32,
+    /// Row of the top log (canopy anchor).
+    pub top_y: i32,
+    pub kind: TreeKind,
+}
+
+/// Surface decoration kinds (no collision). Order = cells of `decor.png`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum DecorKind {
+    TuftA = 0,
+    TuftB,
+    TuftC,
+    FlowerRed,
+    FlowerYellow,
+    FlowerBlue,
+    Pebbles,
+    MushroomRed,
+    MushroomBrown,
+    Bush,
+    BushBerry,
+}
+
+impl DecorKind {
+    pub const COUNT: usize = 11;
+    /// Plants that sway in the wind.
+    pub fn sways(self) -> bool {
+        matches!(
+            self,
+            DecorKind::TuftA
+                | DecorKind::TuftB
+                | DecorKind::TuftC
+                | DecorKind::FlowerRed
+                | DecorKind::FlowerYellow
+                | DecorKind::FlowerBlue
+        )
+    }
+}
+
+/// A decoration standing in air cell (x, y) on top of the grass tile at (x, y + 1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Decor {
+    pub x: i32,
+    pub y: i32,
+    pub kind: DecorKind,
+    /// Per-decor randomness (sway phase, flip).
+    pub seed: u8,
+}
+
 pub struct World {
     pub w: i32,
     pub h: i32,
@@ -90,6 +159,10 @@ pub struct World {
     pub surface: Vec<i32>,
     /// Bumped on every edit; renderers/light maps can cache on it.
     pub revision: u64,
+    /// Trees (sorted by x). Their canopies are drawn while the top log exists.
+    pub trees: Vec<Tree>,
+    /// Surface decorations (sorted by x). Removed when their cell or the ground under them changes.
+    pub decor: Vec<Decor>,
 }
 
 impl World {
@@ -107,6 +180,10 @@ impl World {
         if x >= 0 && y >= 0 && x < self.w && y < self.h {
             self.tiles[(y * self.w + x) as usize] = t;
             self.revision += 1;
+            // Decor in this cell, or standing on it, goes away for good.
+            if !self.decor.is_empty() {
+                self.decor.retain(|d| !(d.x == x && (d.y == y || d.y + 1 == y)));
+            }
         }
     }
 
@@ -173,7 +250,7 @@ impl World {
             }
         }
 
-        let mut world = World { w, h, seed, tiles, surface, revision: 0 };
+        let mut world = World { w, h, seed, tiles, surface, revision: 0, trees: Vec::new(), decor: Vec::new() };
 
         // Caves: worm-ish noise channels below the dirt, kept away from spawn's top.
         for y in 0..h - 1 {
@@ -227,26 +304,68 @@ impl World {
             if (x - center).abs() > 6 && r > 0.55 {
                 let gy = world.surface[x as usize];
                 if world.get(x, gy) == Tile::Grass {
-                    let height = 4 + (hash2(seed, x, 3) * 4.0) as i32;
+                    let k = hash2(seed, x, 11);
+                    let kind = if k < 0.36 {
+                        TreeKind::Oak
+                    } else if k < 0.64 {
+                        TreeKind::Pine
+                    } else if k < 0.84 {
+                        TreeKind::Blossom
+                    } else {
+                        TreeKind::Autumn
+                    };
+                    let (min_h, span) = match kind {
+                        TreeKind::Blossom => (2, 2.0),
+                        TreeKind::Pine => (3, 3.0),
+                        _ => (3, 2.0),
+                    };
+                    let height = min_h + (hash2(seed, x, 3) * span) as i32;
                     for t in 1..=height {
                         world.set(x, gy - t, Tile::Log);
                     }
-                    let top = gy - height;
-                    for dy in -3i32..=1 {
-                        for dx in -3i32..=3 {
-                            let dist = (dx * dx) as f32 / 9.0 + (dy * dy) as f32 / 5.0;
-                            if dist <= 1.1 + hash2(seed, x + dx * 31, dy) * 0.3
-                                && world.get(x + dx, top + dy) == Tile::Air
-                            {
-                                world.set(x + dx, top + dy, Tile::Leaves);
-                            }
-                        }
-                    }
+                    world.trees.push(Tree { x, base_y: gy, top_y: gy - height, kind });
                 }
                 x += 6 + (hash2(seed, x, 5) * 6.0) as i32;
             } else {
                 x += 2;
             }
+        }
+
+        // Surface decorations on open grass tops (not on or right next to a trunk).
+        for x in 1..w - 1 {
+            let gy = world.surface[x as usize];
+            if world.get(x, gy) != Tile::Grass || world.get(x, gy - 1) != Tile::Air {
+                continue;
+            }
+            let tree_d = world.trees.iter().map(|t| (t.x - x).abs()).min().unwrap_or(99);
+            if tree_d == 0 {
+                continue;
+            }
+            let r = hash2(seed ^ 0xDEC0, x, gy);
+            let pick = hash2(seed ^ 0xDEC1, x, gy);
+            let kind = if r < 0.30 {
+                [DecorKind::TuftA, DecorKind::TuftB, DecorKind::TuftC][(pick * 3.0) as usize % 3]
+            } else if r < 0.42 {
+                [DecorKind::FlowerRed, DecorKind::FlowerYellow, DecorKind::FlowerBlue][(pick * 3.0) as usize % 3]
+            } else if r < 0.46 {
+                DecorKind::Pebbles
+            } else if r < 0.49 || (tree_d <= 2 && r < 0.60) {
+                if pick < 0.5 {
+                    DecorKind::MushroomRed
+                } else {
+                    DecorKind::MushroomBrown
+                }
+            } else if r < 0.55 && tree_d > 1 {
+                if pick < 0.6 {
+                    DecorKind::Bush
+                } else {
+                    DecorKind::BushBerry
+                }
+            } else {
+                continue;
+            };
+            let s = (hash2(seed ^ 0xDEC2, x, gy) * 256.0) as u8;
+            world.decor.push(Decor { x, y: gy - 1, kind, seed: s });
         }
 
         world.revision = 0;
@@ -327,8 +446,38 @@ mod tests {
         let a = World::generate(42);
         let b = World::generate(42);
         assert_eq!(a.tiles, b.tiles);
+        assert_eq!(a.trees, b.trees);
+        assert_eq!(a.decor, b.decor);
         let c = World::generate(43);
         assert_ne!(a.tiles, c.tiles);
+    }
+
+    #[test]
+    fn trees_have_logs_and_no_leaf_blocks() {
+        let w = World::generate(42);
+        assert!(w.trees.len() >= 10, "trees: {}", w.trees.len());
+        assert!(!w.tiles.contains(&Tile::Leaves));
+        for t in &w.trees {
+            assert_eq!(w.get(t.x, t.base_y), Tile::Grass);
+            for y in t.top_y..t.base_y {
+                assert_eq!(w.get(t.x, y), Tile::Log);
+            }
+            assert_ne!(w.get(t.x, t.top_y - 1), Tile::Log);
+        }
+        assert!(w.trees.windows(2).all(|p| p[0].x < p[1].x));
+    }
+
+    #[test]
+    fn decor_sits_on_grass_and_goes_when_ground_is_mined() {
+        let mut w = World::generate(42);
+        assert!(w.decor.len() > 40, "decor: {}", w.decor.len());
+        for d in &w.decor {
+            assert_eq!(w.get(d.x, d.y), Tile::Air);
+            assert_eq!(w.get(d.x, d.y + 1), Tile::Grass);
+        }
+        let d = w.decor[0];
+        w.set(d.x, d.y + 1, Tile::Air);
+        assert!(!w.decor.iter().any(|e| e.x == d.x && e.y == d.y));
     }
 
     #[test]
