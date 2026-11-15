@@ -117,6 +117,15 @@ impl GameApi for Game {
             }
         }
         self.player.update(dt, &player_ctl, &mut self.cam, &mut self.world, &mut self.particles, busy.mouse || busy.frozen);
+        self.player.break_screens(
+            dt,
+            &player_ctl,
+            &mut self.cam,
+            &mut self.screens,
+            &mut self.particles,
+            &mut self.events,
+            busy.mouse || busy.frozen,
+        );
 
         let mut ctx = MobCtx {
             world: &self.world,
@@ -153,6 +162,7 @@ impl GameApi for Game {
         self.mobs.draw(&mut c, &self.cam, &self.light);
         let (px, py) = self.player.center();
         self.player.draw(&mut c, &self.cam, &self.sprites, self.light.level_at(px, py));
+        self.player.draw_smash(&mut c, &self.cam, self.time);
         self.particles.draw(&mut c, &self.cam);
         if self.hud_visible {
             self.player.draw_cursor(&mut c, &self.cam, &self.world);
@@ -329,6 +339,63 @@ mod tests {
         fn info(&self, id: ScreenId) -> ScreenInfo {
             self.g.screens().into_iter().find(|s| s.id == id).expect("screen info")
         }
+    }
+
+    /// A built screen next to the player with the chooser dismissed.
+    fn online_screen(d: &mut Driver) -> ScreenId {
+        let id = d.screen_next_to_player();
+        d.tap(Key::Escape);
+        d.steps(20); // close animation
+        assert!(d.g.screens.chooser.is_none());
+        id
+    }
+
+    #[test]
+    fn smash_key_breaks_nearby_screen() {
+        let mut d = Driver::new();
+        let id = online_screen(&mut d);
+        assert_eq!(d.g.screens.near_online(), Some(id));
+        d.input.set(Key::Smash, true);
+        d.steps((crate::player::SMASH_TIME * 60.0) as usize + 5);
+        d.input.set(Key::Smash, false);
+        d.steps(90);
+        assert_eq!(d.count(|e| matches!(e, GameEvent::ScreenDestroyed { id: i } if *i == id)), 1);
+        assert!(d.g.screens.find(id).is_none());
+    }
+
+    #[test]
+    fn short_smash_press_does_nothing() {
+        let mut d = Driver::new();
+        let id = online_screen(&mut d);
+        d.input.set(Key::Smash, true);
+        d.steps(20);
+        d.input.set(Key::Smash, false);
+        d.steps(60);
+        assert!(d.g.screens.find(id).is_some_and(|s| s.hp >= 1.0));
+    }
+
+    #[test]
+    fn pickaxe_and_sword_wear_down_frames() {
+        let mut d = Driver::new();
+        let id = online_screen(&mut d);
+        let s = d.g.screens.find(id).map(|s| (s.tx, s.ty, s.th)).expect("screen");
+        // Pickaxe: hold LMB on the bottom-left frame block for one second.
+        d.mouse_at_tile(s.0, s.1 + s.2 - 1);
+        d.input.lmb = true;
+        d.steps(60);
+        d.input.lmb = false;
+        d.steps(2);
+        let hp1 = d.info(id).hp;
+        assert!(hp1 < 0.8 && hp1 > 0.5, "pickaxe ~30%/s, got hp {hp1}");
+        // Sword: swing at the air just above the frame's bottom edge.
+        let px = d.player_tile();
+        d.mouse_at_tile(px + 1, s.1 + s.2 - 3);
+        d.input.lmb = true;
+        d.steps(60);
+        d.input.lmb = false;
+        d.steps(2);
+        let hp2 = d.info(id).hp;
+        assert!(hp2 < hp1 - 0.05, "sword hits should land: {hp1} -> {hp2}");
     }
 
     #[test]

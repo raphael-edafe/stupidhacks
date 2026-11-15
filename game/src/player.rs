@@ -21,6 +21,8 @@ const HAND: (i32, i32) = (9, 24);
 /// Shoulder in sprite px (sword arc centre).
 const SHOULDER: (i32, i32) = (9, 15);
 const REACH: f32 = 6.0 * TILE as f32;
+/// Hold Q this long near a screen to smash it.
+pub const SMASH_TIME: f32 = 0.8;
 const SWING_TIME: f32 = 0.28;
 
 pub const HOTBAR: [Tile; 5] = [Tile::Dirt, Tile::Stone, Tile::Plank, Tile::Torch, Tile::Crystal];
@@ -50,6 +52,13 @@ pub struct Player {
     jump_buffer: f32,
     mining: Option<(i32, i32, f32)>,
     place_cooldown: f32,
+    /// This sword swing already hit a screen frame.
+    swing_hit: bool,
+    /// Pickaxe-on-frame strike timer.
+    frame_chip: f32,
+    /// Smash key charge (0..SMASH_TIME); `smash_lock` waits for Q to be released.
+    pub smash_charge: f32,
+    smash_lock: bool,
     /// The tile under the cursor if it's within reach (for the highlight).
     pub hover: Option<(i32, i32)>,
 }
@@ -85,6 +94,10 @@ impl Player {
             jump_buffer: 0.0,
             mining: None,
             place_cooldown: 0.0,
+            swing_hit: false,
+            frame_chip: 0.0,
+            smash_charge: 0.0,
+            smash_lock: false,
             hover: None,
         }
     }
@@ -295,6 +308,87 @@ impl Player {
         self.vy = 0.0;
     }
 
+    /// Breaking screens by hand. Runs after `update`. Sword swings and pickaxe
+    /// strikes on a frame wear its HP down; holding Q near a screen smashes it.
+    /// Everything goes through `Screens::damage`/`smash`, so a broken screen
+    /// explodes and its app closes, exactly like a mob kill.
+    #[allow(clippy::too_many_arguments)]
+    pub fn break_screens(
+        &mut self,
+        dt: f32,
+        ctl: &Controls,
+        cam: &mut Camera,
+        screens: &mut crate::screens::Screens,
+        fx: &mut Particles,
+        events: &mut Vec<shared::GameEvent>,
+        busy: bool,
+    ) {
+        if self.swing <= 0.0 {
+            self.swing_hit = false;
+        }
+        if busy {
+            self.smash_charge = 0.0;
+            return;
+        }
+
+        // Pickaxe on a frame block: a strike every 0.15 s (about 30% HP per second).
+        let (mx, my) = ctl.mouse();
+        let (wx, wy) = cam.to_world(mx, my);
+        let (tx, ty) = ((wx / TILE as f32).floor() as i32, (wy / TILE as f32).floor() as i32);
+        let (cx, cy) = self.center();
+        let in_reach = ((tx * TILE + TILE / 2) as f32 - cx).hypot((ty * TILE + TILE / 2) as f32 - cy) < REACH;
+        match screens.frame_at_tile(tx, ty).filter(|_| ctl.lmb() && in_reach) {
+            Some(id) => {
+                self.swing = 0.0; // pickaxe, not sword
+                self.frame_chip += dt;
+                let p = (self.frame_chip / 0.15).fract();
+                self.mining = Some((tx, ty, p));
+                if self.frame_chip >= 0.15 {
+                    self.frame_chip -= 0.15;
+                    let at = ((tx * TILE + 8) as f32, (ty * TILE + 8) as f32);
+                    let dmg = if self.god { 0.09 } else { 0.045 };
+                    screens.damage(id, dmg, at, fx, events);
+                    fx.debris(at.0, at.1, rgb(150, 160, 185), 4);
+                    cam.kick(0.08);
+                }
+            }
+            None => self.frame_chip = 0.0,
+        }
+
+        // Sword: one hit per swing on any frame inside the arc.
+        if !self.swing_hit {
+            if let Some(b) = self.attack_box() {
+                if let Some(&id) = screens.frames_overlapping(b).first() {
+                    let at = (b.0 + b.2 / 2.0, b.1 + b.3 / 2.0);
+                    screens.damage(id, 0.06, at, fx, events);
+                    self.swing_hit = true;
+                    cam.kick(0.12);
+                }
+            }
+        }
+
+        // Smash key: hold Q near a screen.
+        if !ctl.down(Key::Smash) {
+            self.smash_lock = false;
+        }
+        match screens.near_online().filter(|_| ctl.down(Key::Smash) && !self.smash_lock) {
+            Some(id) => {
+                let before = self.smash_charge;
+                self.smash_charge += dt;
+                if ((self.smash_charge * 12.0) as i32) != ((before * 12.0) as i32) {
+                    fx.sparkle(cx, cy - 4.0, rgb(255, 120, 80), 2);
+                }
+                if self.smash_charge >= SMASH_TIME {
+                    screens.smash(id, fx, events, cam);
+                    self.smash_charge = 0.0;
+                    self.smash_lock = true;
+                    self.swing = SWING_TIME; // big swing for the hit
+                }
+            }
+            None => self.smash_charge = (self.smash_charge - dt * 3.0).max(0.0),
+        }
+    }
+
     /// Hitbox of the current sword swing, if active: (x, y, w, h) in world px.
     pub fn attack_box(&self) -> Option<(f32, f32, f32, f32)> {
         if self.swing > SWING_TIME * 0.25 {
@@ -443,6 +537,33 @@ impl Player {
                 c.blend(x, y, col);
             }
         }
+    }
+
+    /// Charge ring while holding the smash key (FX layer).
+    pub fn draw_smash(&self, c: &mut Canvas, cam: &Camera, time: f32) {
+        if self.smash_charge <= 0.0 {
+            return;
+        }
+        let p = (self.smash_charge / SMASH_TIME).clamp(0.0, 1.0);
+        let (cx, cy) = self.center();
+        let (vx, vy) = cam.to_view(cx, cy - 6.0);
+        let r = 17.0 - p * 3.0;
+        let col = crate::gfx::lerp_color(rgb(255, 220, 90), rgb(255, 70, 50), p);
+        // Dim full ring, then the filled arc from 12 o'clock clockwise.
+        let steps = 72;
+        for i in 0..steps {
+            let f = i as f32 / steps as f32;
+            let a = -std::f32::consts::FRAC_PI_2 + f * std::f32::consts::TAU;
+            let (x, y) = (vx + (a.cos() * r).round() as i32, vy + (a.sin() * r).round() as i32);
+            if f <= p {
+                c.fill_rect(x - 1, y - 1, 2, 2, col);
+            } else {
+                c.blend(x, y, rgba(255, 255, 255, 60));
+            }
+        }
+        c.glow(vx, vy, (r * 0.9) as i32, with_alpha(col, (60.0 * p) as u8));
+        let jitter = if p > 0.6 { ((time * 50.0).sin() * 1.5) as i32 } else { 0 };
+        c.text_centered(vx + jitter, vy - r as i32 - 10, "SMASH!", 1, col);
     }
 
     /// Mining crack + hover outline (FX layer).

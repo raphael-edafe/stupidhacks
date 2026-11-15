@@ -1000,14 +1000,17 @@ impl Screens {
         if let Some(s) = self.prompt_id.and_then(|id| self.find(id)) {
             if self.prompt_a > 0.0 {
                 let a = ui::ease_out_cubic(self.prompt_a);
-                let (fx0, fy0, fw, _) = s.frame_px();
+                let (fx0, fy0, fw, fh) = s.frame_px();
                 let (vfx, vfy) = cam.to_view(fx0, fy0);
                 let cx = vfx + fw as i32 / 2;
                 let lift = if s.hp < 1.0 { 30 } else { 24 };
                 let bob = ((self.time * 3.0).sin() * 1.2).round() as i32;
-                let y = (vfy - lift + bob + ((1.0 - a) * 6.0) as i32).max(3);
+                let slide = ((1.0 - a) * 6.0) as i32;
+                // Above the frame if there's room, otherwise just below it
+                // (never on top of the name plate).
+                let y = if vfy - lift >= 3 { vfy - lift + bob + slide } else { vfy + fh as i32 + 6 + bob - slide };
                 if s.occupied {
-                    ui::draw_prompt(c, cx, y, &[("Z", "ZOOM"), ("X", "CLOSE")], rgb(90, 240, 255), a);
+                    ui::draw_prompt(c, cx, y, &[("Z", "ZOOM"), ("X", "CLOSE"), ("Q", "SMASH")], rgb(90, 240, 255), a);
                 } else if s.is_empty() {
                     ui::draw_prompt(c, cx, y, &[("E", "OPEN APP")], rgb(255, 200, 90), a);
                 }
@@ -1184,5 +1187,63 @@ fn draw_frame_tile(c: &mut Canvas, s: &Screen, tx: i32, ty: i32, x: i32, y: i32,
     }
     if fresh {
         c.fill_rect(x, y, t, t, rgba(220, 250, 255, 170));
+    }
+}
+
+// ---------------- breaking screens by hand (sword, pickaxe, smash key) ----------------
+
+impl Screens {
+    /// The built, online screen whose frame border occupies tile (tx, ty).
+    pub fn frame_at_tile(&self, tx: i32, ty: i32) -> Option<ScreenId> {
+        self.list
+            .iter()
+            .filter(|s| s.attackable())
+            .find(|s| {
+                let inside = tx >= s.tx && tx < s.tx + s.tw && ty >= s.ty && ty < s.ty + s.th;
+                let border = tx == s.tx || tx == s.tx + s.tw - 1 || ty == s.ty || ty == s.ty + s.th - 1;
+                inside && border
+            })
+            .map(|s| s.id)
+    }
+
+    /// Online screens whose frame overlaps a world-px box (x, y, w, h).
+    pub fn frames_overlapping(&self, b: (f32, f32, f32, f32)) -> Vec<ScreenId> {
+        self.list
+            .iter()
+            .filter(|s| s.attackable())
+            .filter(|s| {
+                let (x, y, w, h) = s.frame_px();
+                b.0 < x + w && b.0 + b.2 > x && b.1 < y + h && b.1 + b.3 > y
+            })
+            .map(|s| s.id)
+            .collect()
+    }
+
+    /// The online screen the player is standing near (same one the prompt shows).
+    pub fn near_online(&self) -> Option<ScreenId> {
+        self.near.filter(|id| self.find(*id).is_some_and(|s| s.attackable()))
+    }
+
+    /// Frame centre-ish point to aim effects at.
+    pub fn frame_center(&self, id: ScreenId) -> Option<(f32, f32)> {
+        self.find(id).map(|s| {
+            let (x, y, w, h) = s.frame_px();
+            (x + w / 2.0, y + h / 2.0)
+        })
+    }
+
+    /// Break a screen outright (smash key): big hit, then the normal dying ->
+    /// explosion -> ScreenDestroyed pipeline closes its app.
+    pub fn smash(&mut self, id: ScreenId, fx: &mut Particles, events: &mut Vec<GameEvent>, cam: &mut Camera) {
+        let Some((cx, cy)) = self.frame_center(id) else { return };
+        let hp = self.find(id).map(|s| s.hp).unwrap_or(0.0);
+        // A few impacts spread over the glass so the cracks look like a smash.
+        for k in 0..5 {
+            let a = k as f32 * 1.256 + 0.4;
+            let at = (cx + a.cos() * 40.0, cy + a.sin() * 22.0);
+            self.damage(id, if k == 4 { hp + 1.0 } else { 0.0 }, at, fx, events);
+        }
+        fx.debris(cx, cy, rgb(200, 240, 255), 30);
+        cam.kick(0.6);
     }
 }
