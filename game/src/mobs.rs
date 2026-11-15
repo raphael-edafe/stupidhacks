@@ -22,7 +22,7 @@ use crate::particles::{Particle, Particles};
 use crate::player::{self, Player};
 use crate::screens::Screens;
 use crate::sky::Sky;
-use crate::world::{World, TILE};
+use crate::world::{Tile, World, TILE};
 use shared::{GameEvent, ScreenId};
 
 pub struct MobCtx<'a> {
@@ -81,6 +81,9 @@ const SPAWN_MAX: f32 = 290.0;
 /// Delay after nightfall before the first zombie.
 const FIRST_SPAWN: f32 = 0.8;
 const MAX_ALIVE: usize = 6;
+
+/// Torches keep zombies and bats from spawning within this many tiles.
+pub const TORCH_SAFE: i32 = 10;
 
 /// Zombies spawn while daylight is below SPAWN_LIGHT and burn once it's above BURN_LIGHT.
 const SPAWN_LIGHT: f32 = 0.05;
@@ -337,7 +340,9 @@ impl Mobs {
         list.retain(|z| z.hp > 0);
 
         // --- bats, then the harmless animals (birds scatter from zombies and bats) ---
-        self.bats.update(dt, ctx, &mut self.calm, &|_, _| true);
+        // Bats spawn above the view: keep them off any column a torch protects.
+        let (world, top, bottom) = (ctx.world, ctx.cam.y, ctx.cam.y + ctx.cam.vh);
+        self.bats.update(dt, ctx, &mut self.calm, &|x, _| !torch_near(world, x, top, bottom));
         let threats: Vec<(f32, f32)> = self.list.iter().map(|z| z.center()).chain(self.bats.centers()).collect();
         self.critters.update(dt, ctx, &threats);
     }
@@ -356,6 +361,9 @@ impl Mobs {
             }
             let gy = world.ground_y(((x + W / 2.0) / t).floor() as i32);
             let feet = (gy * TILE) as f32 - 0.5;
+            if torch_near(world, x + W / 2.0, feet - H / 2.0, feet - H / 2.0) {
+                continue; // torchlight: nothing rises here
+            }
             if collides(x, feet - H, world) {
                 continue; // uneven ground: part of the body would be inside a wall
             }
@@ -579,6 +587,14 @@ fn update_zombie(z: &mut Mob, dt: f32, ctx: &mut MobCtx, targets: &[(ScreenId, (
             ctx.player.hurt(TOUCH_DAMAGE, cx, ctx.fx);
         }
     }
+}
+
+/// True if a torch is within TORCH_SAFE tiles of world x, between heights y0 and y1 (± TORCH_SAFE).
+fn torch_near(world: &World, x: f32, y0: f32, y1: f32) -> bool {
+    let t = TILE as f32;
+    let cx = (x / t).floor() as i32;
+    let (r0, r1) = ((y0 / t).floor() as i32 - TORCH_SAFE, (y1 / t).floor() as i32 + TORCH_SAFE);
+    (r0..=r1).any(|ty| (cx - TORCH_SAFE..=cx + TORCH_SAFE).any(|tx| world.get(tx, ty) == Tile::Torch))
 }
 
 /// Distance from a point to a rect (0 inside).
@@ -890,6 +906,24 @@ mod tests {
         for _ in 0..(seconds * 60.0) as usize {
             g.update(1.0 / 60.0, &input);
         }
+    }
+
+    #[test]
+    fn nothing_spawns_near_torches() {
+        let mut g = Game::new(DEFAULT_SEED);
+        g.player.god = true;
+        tick(&mut g, 1.0);
+        // Torches at the player and 12 tiles either side cover every spawn spot.
+        let ptx = (g.player.center().0 / TILE as f32) as i32;
+        for tx in [ptx - 12, ptx, ptx + 12] {
+            let ty = g.world.ground_y(tx) - 1;
+            g.world.set(tx, ty, Tile::Torch);
+        }
+        g.player.vx = 0.0;
+        g.sky.clock = DAY_LEN + 0.1;
+        tick(&mut g, 20.0);
+        assert!(g.mobs.list.is_empty(), "zombies rose in torchlight");
+        assert!(g.mobs.bats.list.is_empty(), "bats spawned over torchlight");
     }
 
     /// Raise a zombie with its left edge at world x, feet on the ground there.
