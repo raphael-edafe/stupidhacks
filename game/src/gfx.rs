@@ -194,6 +194,25 @@ impl<'a> Canvas<'a> {
         }
     }
 
+    /// Sprite multiplied by a tint colour (time-of-day tinting of backdrops).
+    pub fn sprite_tinted(&mut self, s: &Sprite, x: i32, y: i32, tint: Rgba) {
+        let (tr, tg, tb) = (tint[0] as u32, tint[1] as u32, tint[2] as u32);
+        for sy in 0..s.h {
+            let yy = y + sy;
+            if yy < 0 || yy >= self.h {
+                continue;
+            }
+            for sx in 0..s.w {
+                let p = s.px[(sy * s.w + sx) as usize];
+                if p[3] == 0 {
+                    continue;
+                }
+                let c = [((p[0] as u32 * tr) / 255) as u8, ((p[1] as u32 * tg) / 255) as u8, ((p[2] as u32 * tb) / 255) as u8, p[3]];
+                self.blend(x + sx, yy, c);
+            }
+        }
+    }
+
     /// Sprite drawn as a flat colour silhouette (hit flash, shadows).
     pub fn sprite_flat(&mut self, s: &Sprite, x: i32, y: i32, flip_x: bool, c: Rgba) {
         for sy in 0..s.h {

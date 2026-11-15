@@ -4,6 +4,7 @@
 //!   B1: world, sprites, render, player, screens, particles, camera, input, gfx, lib (this file)
 //!   B2: sky, light, mobs, hud
 
+pub mod atmos;
 pub mod camera;
 pub mod gfx;
 pub mod hud;
@@ -51,6 +52,12 @@ pub struct Game {
     pub hud_visible: bool,
     /// Smoothed simulation rate (for the debug FPS readout).
     pub fps: f32,
+    pub atmos: atmos::Atmos,
+    /// Sky is drawn here, then composited behind the lit terrain.
+    sky_buf: Vec<u8>,
+    /// Per-pixel vignette factor (x256) for the current view size.
+    vignette: Vec<u16>,
+    vignette_size: (u32, u32),
 }
 
 impl Game {
@@ -78,6 +85,10 @@ impl Game {
             god: false,
             hud_visible: true,
             fps: 60.0,
+            atmos: atmos::Atmos::new(),
+            sky_buf: Vec::new(),
+            vignette: Vec::new(),
+            vignette_size: (0, 0),
         }
     }
 }
@@ -139,18 +150,59 @@ impl GameApi for Game {
         self.mobs.update(dt, &mut ctx);
 
         self.particles.update(dt, &self.world);
+        self.atmos.update(dt, &self.world, &self.cam, self.sky.daylight(), &self.screens);
         let (cx, cy) = self.player.center();
         self.cam.follow(cx, cy, dt, &self.world);
     }
 
     fn draw_world(&mut self, rgba_buf: &mut [u8]) {
         let (w, h) = self.view_size();
+        // 1. Terrain + screens on a transparent canvas, lit by the light map.
+        {
+            let mut c = Canvas::new(rgba_buf, w, h);
+            c.clear(rgba(0, 0, 0, 0));
+            render::draw_tiles(&mut c, &self.world, &self.sprites, &self.cam);
+            self.screens.draw_world(&mut c, &self.cam);
+            self.light.update(
+                &self.world,
+                &self.cam,
+                self.sky.daylight(),
+                self.sky.warmth(),
+                &self.screens,
+                self.player.center(),
+                self.time,
+            );
+            self.light.apply(&mut c, &self.cam);
+        }
+        // 2. Sky behind it (never darkened by the light map), plus a soft vignette.
+        let n = (w * h * 4) as usize;
+        self.sky_buf.resize(n, 0);
+        {
+            let mut sc = Canvas::new(&mut self.sky_buf, w, h);
+            let art = sky::SkyArt::default();
+            self.sky.draw(&mut sc, &self.cam, &self.world, &art);
+        }
+        if self.vignette_size != (w, h) {
+            self.vignette = make_vignette(w, h);
+            self.vignette_size = (w, h);
+        }
+        for ((p, s), v) in rgba_buf.chunks_exact_mut(4).zip(self.sky_buf.chunks_exact(4)).zip(self.vignette.iter()) {
+            let a = p[3] as u32;
+            if a < 255 {
+                for k in 0..3 {
+                    p[k] = ((p[k] as u32 * a + s[k] as u32 * (255 - a)) / 255) as u8;
+                }
+                p[3] = 255;
+            }
+            let v = *v as u32;
+            if v < 256 {
+                for k in 0..3 {
+                    p[k] = ((p[k] as u32 * v) >> 8) as u8;
+                }
+            }
+        }
+        // 3. Zoom-into-screen dimming on top.
         let mut c = Canvas::new(rgba_buf, w, h);
-        self.sky.draw(&mut c, &self.cam, &self.world);
-        render::draw_tiles(&mut c, &self.world, &self.sprites, &self.cam);
-        self.screens.draw_world(&mut c, &self.cam);
-        self.light.update(&self.world, &self.cam, self.sky.daylight(), &self.screens);
-        self.light.apply(&mut c);
         self.screens.draw_zoom_world(&mut c);
     }
 
@@ -159,6 +211,8 @@ impl GameApi for Game {
         let mut c = Canvas::new(rgba_buf, w, h);
         c.clear(rgba(0, 0, 0, 0));
         self.screens.draw_fx(&mut c, &self.cam, &self.world, self.hud_visible || self.sky.is_night());
+        self.atmos.draw_torch_glows(&mut c, &self.cam, &self.world, self.sky.daylight(), self.time);
+        self.atmos.draw(&mut c, &self.cam, self.time);
         self.mobs.draw(&mut c, &self.cam, &self.light);
         let (px, py) = self.player.center();
         self.player.draw(&mut c, &self.cam, &self.sprites, self.light.level_at(px, py));
@@ -187,6 +241,22 @@ impl GameApi for Game {
     fn view_size(&self) -> (u32, u32) {
         (self.cam.vw as u32, self.cam.vh as u32)
     }
+}
+
+/// Soft elliptical vignette: 1.0 in the middle, ~0.8 in the corners (x256).
+fn make_vignette(w: u32, h: u32) -> Vec<u16> {
+    let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
+    let mut v = Vec::with_capacity((w * h) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            let dx = (x as f32 - cx) / cx;
+            let dy = (y as f32 - cy) / cy;
+            let d = (dx * dx * 0.8 + dy * dy).max(0.0);
+            let k = 1.0 - 0.2 * ((d - 0.35).max(0.0) / 1.45).min(1.0).powf(1.5);
+            v.push((k * 256.0) as u16);
+        }
+    }
+    v
 }
 
 #[cfg(test)]
@@ -257,10 +327,63 @@ mod tests {
         g.draw_fx(&mut b);
         assert!(a.chunks_exact(4).all(|p| p[3] == 255), "world layer must be opaque");
         g.sky.skip_to_dusk();
-        tick(&mut g, 600);
+        tick(&mut g, 900);
         assert!(g.sky.is_night());
         g.draw_world(&mut a);
         g.draw_fx(&mut b);
+    }
+
+    /// Timing breakdown of one frame (run: cargo test --release -p game frame_profile -- --ignored --nocapture).
+    #[test]
+    #[ignore]
+    fn frame_profile() {
+        use std::time::Instant;
+        let mut g = Game::new(DEFAULT_SEED);
+        tick(&mut g, 60);
+        for &(w, h) in &[(VIEW_W, VIEW_H), (FAR_W, FAR_H)] {
+            g.cam.set_view(w, h);
+            let mut buf = vec![0u8; (w * h * 4) as usize];
+            let n = 30;
+            let t = Instant::now();
+            for _ in 0..n {
+                let mut c = Canvas::new(&mut buf, w, h);
+                render::draw_tiles(&mut c, &g.world, &g.sprites, &g.cam);
+            }
+            let tiles = t.elapsed() / n;
+            let t = Instant::now();
+            for _ in 0..n {
+                g.light.update(&g.world, &g.cam, 0.3, 0.5, &g.screens, g.player.center(), 1.0);
+            }
+            let lupd = t.elapsed() / n;
+            let t = Instant::now();
+            for _ in 0..n {
+                let mut c = Canvas::new(&mut buf, w, h);
+                g.light.apply(&mut c, &g.cam);
+            }
+            let lapp = t.elapsed() / n;
+            let t = Instant::now();
+            for _ in 0..n {
+                let mut c = Canvas::new(&mut buf, w, h);
+                g.sky.draw(&mut c, &g.cam, &g.world, &sky::SkyArt::default());
+            }
+            let skyt = t.elapsed() / n;
+            let t = Instant::now();
+            for _ in 0..n {
+                g.draw_world(&mut buf);
+            }
+            let world = t.elapsed() / n;
+            let t = Instant::now();
+            for _ in 0..n {
+                g.draw_fx(&mut buf);
+            }
+            let fx = t.elapsed() / n;
+            let t = Instant::now();
+            for _ in 0..n {
+                tick(&mut g, 1);
+            }
+            let upd = t.elapsed() / n;
+            println!("{w}x{h}: tiles {tiles:?} light_upd {lupd:?} light_apply {lapp:?} sky {skyt:?} | draw_world {world:?} draw_fx {fx:?} update {upd:?}");
+        }
     }
 
     // ---------- input-driven interaction tests ----------
