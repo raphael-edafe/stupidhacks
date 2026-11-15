@@ -192,21 +192,7 @@ impl GameApi for Game {
             self.vignette = make_vignette(w, h);
             self.vignette_size = (w, h);
         }
-        for ((p, s), v) in rgba_buf.chunks_exact_mut(4).zip(self.sky_buf.chunks_exact(4)).zip(self.vignette.iter()) {
-            let a = p[3] as u32;
-            if a < 255 {
-                for k in 0..3 {
-                    p[k] = ((p[k] as u32 * a + s[k] as u32 * (255 - a)) / 255) as u8;
-                }
-                p[3] = 255;
-            }
-            let v = *v as u32;
-            if v < 256 {
-                for k in 0..3 {
-                    p[k] = ((p[k] as u32 * v) >> 8) as u8;
-                }
-            }
-        }
+        composite_sky(rgba_buf, &self.sky_buf, &self.vignette);
         // 3. Zoom-into-screen dimming on top.
         let mut c = Canvas::new(rgba_buf, w, h);
         self.screens.draw_zoom_world(&mut c);
@@ -246,6 +232,31 @@ impl GameApi for Game {
 
     fn view_size(&self) -> (u32, u32) {
         (self.cam.vw as u32, self.cam.vh as u32)
+    }
+}
+
+/// Put the sky behind the terrain (alpha 0 = sky, 255 = terrain, partial =
+/// blend) and apply the vignette. Hot loop: fast paths for the common cases.
+fn composite_sky(dst: &mut [u8], sky: &[u8], vignette: &[u16]) {
+    let n = dst.len() / 4;
+    for i in 0..n {
+        let o = i * 4;
+        let a = dst[o + 3];
+        if a == 0 {
+            dst[o..o + 3].copy_from_slice(&sky[o..o + 3]);
+        } else if a != 255 {
+            let a = a as u32 + 1; // 1..=256, so >> 8 replaces / 255
+            for k in 0..3 {
+                dst[o + k] = ((dst[o + k] as u32 * a + sky[o + k] as u32 * (256 - a)) >> 8) as u8;
+            }
+        }
+        dst[o + 3] = 255;
+        let v = vignette[i] as u32;
+        if v < 256 {
+            dst[o] = ((dst[o] as u32 * v) >> 8) as u8;
+            dst[o + 1] = ((dst[o + 1] as u32 * v) >> 8) as u8;
+            dst[o + 2] = ((dst[o + 2] as u32 * v) >> 8) as u8;
+        }
     }
 }
 
@@ -373,6 +384,27 @@ mod tests {
                 g.sky.draw(&mut c, &g.cam, &g.world, &sky::SkyArt::default());
             }
             let skyt = t.elapsed() / n;
+            let t = Instant::now();
+            for _ in 0..n {
+                let sp = &g.sprites;
+                let art = sky::SkyArt {
+                    parallax: [Some(&sp.parallax[0]), Some(&sp.parallax[1]), Some(&sp.parallax[2])],
+                    clouds: &sp.clouds,
+                    sun: Some(&sp.sun),
+                    moon: Some(&sp.moon),
+                };
+                let mut c = Canvas::new(&mut buf, w, h);
+                g.sky.draw(&mut c, &g.cam, &g.world, &art);
+            }
+            let sky_art = t.elapsed() / n;
+            let vig = make_vignette(w, h);
+            let skyb = buf.clone();
+            let t = Instant::now();
+            for _ in 0..n {
+                composite_sky(&mut buf, &skyb, &vig);
+            }
+            let comp = t.elapsed() / n;
+            println!("  {w}x{h}: sky_with_art {sky_art:?} composite {comp:?}");
             let t = Instant::now();
             for _ in 0..n {
                 g.draw_world(&mut buf);

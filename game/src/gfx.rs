@@ -195,20 +195,35 @@ impl<'a> Canvas<'a> {
     }
 
     /// Sprite multiplied by a tint colour (time-of-day tinting of backdrops).
+    /// Clipped once per row; opaque pixels are written directly (fast path for
+    /// big, mostly opaque backdrop strips).
     pub fn sprite_tinted(&mut self, s: &Sprite, x: i32, y: i32, tint: Rgba) {
-        let (tr, tg, tb) = (tint[0] as u32, tint[1] as u32, tint[2] as u32);
+        let (tr, tg, tb) = (tint[0] as u32 + 1, tint[1] as u32 + 1, tint[2] as u32 + 1);
+        let sx0 = (-x).max(0);
+        let sx1 = (self.w - x).min(s.w);
+        if sx0 >= sx1 {
+            return;
+        }
+        let w = self.w as usize;
         for sy in 0..s.h {
             let yy = y + sy;
             if yy < 0 || yy >= self.h {
                 continue;
             }
-            for sx in 0..s.w {
-                let p = s.px[(sy * s.w + sx) as usize];
+            let src_row = (sy * s.w) as usize;
+            let dst_row = yy as usize * w;
+            for sx in sx0..sx1 {
+                let p = s.px[src_row + sx as usize];
                 if p[3] == 0 {
                     continue;
                 }
-                let c = [((p[0] as u32 * tr) / 255) as u8, ((p[1] as u32 * tg) / 255) as u8, ((p[2] as u32 * tb) / 255) as u8, p[3]];
-                self.blend(x + sx, yy, c);
+                let c = [((p[0] as u32 * tr) >> 8) as u8, ((p[1] as u32 * tg) >> 8) as u8, ((p[2] as u32 * tb) >> 8) as u8, p[3]];
+                if p[3] == 255 {
+                    let i = (dst_row + (x + sx) as usize) * 4;
+                    self.px[i..i + 4].copy_from_slice(&c);
+                } else {
+                    self.blend(x + sx, yy, c);
+                }
             }
         }
     }
