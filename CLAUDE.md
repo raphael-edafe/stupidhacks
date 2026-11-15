@@ -31,9 +31,9 @@ Interfaces B2 builds on:
 
 ## Architecture
 
-The game software-renders two RGBA layers at **640x360 view pixels** (`shared::VIEW_W/VIEW_H`). The compositor uploads them each frame as memory buffers and draws them at 3x (`SCALE`) with nearest filtering:
+The game software-renders two RGBA layers at **768x432 view pixels** (`shared::VIEW_W/VIEW_H`). The compositor uploads them each frame as memory buffers and scales them to fit the output (2.5x on 1920x1080) with nearest filtering:
 1. **World layer**: sky, tiles, lighting. Opaque, drawn under the windows.
-2. **Client windows**: each placed at its `ScreenInfo.rect` × SCALE, every frame. The game applies camera and shake to that rect.
+2. **Client windows**: each placed at its `ScreenInfo.rect` × the output scale, every frame. The game applies camera and shake to that rect.
 3. **FX layer**: player, mobs, particles, cracks, HUD. Transparent, drawn over the windows.
 
 The game ticks at a fixed 60 Hz (`GameApi::update`). Events flow one way:
@@ -45,7 +45,7 @@ The compositor reports window attach/detach back through `set_screen_occupied`. 
 ## Commands
 
 ```
-cargo run -p game --bin preview --release   # game alone in a minifb window (--scale 3 for 1080p)
+cargo run -p game --bin preview --release   # game alone in a minifb window (default --scale 2 = 1536x864)
 cargo run -p game --bin preview --release -- --shots /tmp/shots   # headless scripted demo -> PNGs + perf line
 cargo run -p compositor --release           # nested compositor inside the GNOME session
 cargo run -p compositor --release -- --no-kill

@@ -44,7 +44,7 @@ pub struct WinEntry {
     pub configured: Option<(i32, i32)>,
 }
 
-/// Maps the game's 640x360 view into the output (uniform scale + letterbox offset).
+/// Maps the game's VIEW_W x VIEW_H view into the output (uniform scale + letterbox offset).
 #[derive(Clone, Copy, Debug)]
 pub struct ViewXform {
     pub scale: f64,

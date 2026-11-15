@@ -4,14 +4,15 @@
 //! person's build, so agree on changes first.
 //!
 //! Coordinates: everything here is in *view pixels*. The game renders a
-//! VIEW_W x VIEW_H image; the compositor scales it up by SCALE with nearest
-//! filtering. One view pixel = SCALE output pixels.
+//! VIEW_W x VIEW_H image; the compositor scales it up to fit the output with
+//! nearest filtering (2.5x on the 1920x1080 demo output).
 
-pub const VIEW_W: u32 = 640;
-pub const VIEW_H: u32 = 360;
-pub const SCALE: u32 = 3;
-pub const OUTPUT_W: u32 = VIEW_W * SCALE; // 1920
-pub const OUTPUT_H: u32 = VIEW_H * SCALE; // 1080
+/// 768x432 shows 20% more world each way than the old 640x360 (3x) view.
+pub const VIEW_W: u32 = 768;
+pub const VIEW_H: u32 = 432;
+/// The demo output size. VIEW_W x VIEW_H fits it exactly (2.5x).
+pub const OUTPUT_W: u32 = 1920;
+pub const OUTPUT_H: u32 = 1080;
 
 /// Bytes in one RGBA8 layer buffer (row-major, top-left origin, straight alpha).
 pub const LAYER_BYTES: usize = (VIEW_W * VIEW_H * 4) as usize;
