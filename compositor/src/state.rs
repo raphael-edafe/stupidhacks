@@ -118,6 +118,8 @@ pub struct Siege {
     pub view: ViewXform,
     pub opts: Options,
     pub frame: u64,
+    /// Test hook: press this key on the game's chooser at this time (autolaunch).
+    pub autopick: Option<(Instant, Key, u8)>,
 }
 
 impl Siege {
@@ -167,6 +169,7 @@ impl Siege {
             view: ViewXform::for_output(1920, 1080),
             opts,
             frame: 0,
+            autopick: None,
         }
     }
 
@@ -214,6 +217,12 @@ impl Siege {
             input.set(Key::Escape, true);
             self.escape_pulse = false;
         }
+        if let Some((at, k, n)) = self.autopick {
+            if Instant::now() >= at {
+                input.set(k, n < 2); // hold for two ticks, then release
+                self.autopick = if n < 3 { Some((at, k, n + 1)) } else { None };
+            }
+        }
         self.game.update(dt, &input);
 
         for ev in self.game.drain_events() {
@@ -240,7 +249,10 @@ impl Siege {
             GameEvent::ScreenBuilt { id } => {
                 info!("screen {id} built");
                 if let Some(app) = self.opts.autolaunch {
-                    self.launch(id, app & 0xFFF);
+                    let keys = [Key::Hotbar1, Key::Hotbar2, Key::Hotbar3, Key::Hotbar4, Key::Hotbar5];
+                    if let Some(k) = keys.get(app & 0xFFF) {
+                        self.autopick = Some((Instant::now() + Duration::from_millis(700), *k, 0));
+                    }
                 }
             }
             GameEvent::LaunchApp { id, app } => self.launch(id, app),

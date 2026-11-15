@@ -54,7 +54,25 @@ pub fn draw_app_icon(c: &mut Canvas, index: usize, x: i32, y: i32) {
     draw_app_icon_a(c, index, x, y, 1.0);
 }
 
+/// pxl-made app icons (set once from `Sprites` at startup).
+static ICONS: std::sync::OnceLock<Vec<crate::gfx::Sprite>> = std::sync::OnceLock::new();
+
+pub fn set_icons(icons: Vec<crate::gfx::Sprite>) {
+    let _ = ICONS.set(icons);
+}
+
 pub fn draw_app_icon_a(c: &mut Canvas, index: usize, x: i32, y: i32, a: f32) {
+    if let Some(icon) = ICONS.get().and_then(|v| v.get(index)) {
+        for sy in 0..icon.h {
+            for sx in 0..icon.w {
+                let p = icon.get(sx, sy);
+                if p[3] > 0 {
+                    c.blend(x + sx, y + sy, [p[0], p[1], p[2], (p[3] as f32 * a.clamp(0.0, 1.0)) as u8]);
+                }
+            }
+        }
+        return;
+    }
     const STYLE: [(Rgba, char); 6] = [
         (rgb(34, 150, 96), 'T'),
         (rgb(222, 160, 56), 'F'),

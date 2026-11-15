@@ -273,11 +273,20 @@ fn render_frame(f: &mut Frame, st: &mut Siege) {
             let w = &st.windows[i];
             let Some(mut r) = st.window_rect(w, ow, oh) else { continue };
             let mut alpha = 1.0;
+            let zoomed = st.screens.iter().map(|s| s.zoom).fold(0.0f32, f32::max);
+            let my_zoom = w.screen.and_then(|id| st.screens.iter().find(|s| s.id == id)).map(|s| s.zoom).unwrap_or(0.0);
+            if zoomed > 0.0 && my_zoom < zoomed {
+                // Another screen is zoomed in: fade this window out with the world.
+                alpha = 1.0 - zoomed;
+                if alpha < 0.02 {
+                    continue;
+                }
+            }
             if let Some(info) = w.screen.and_then(|id| st.screens.iter().find(|s| s.id == id)) {
                 if info.glitch {
                     let k = ((t * 60.0) as u32).wrapping_mul(2654435761) >> 16;
                     r.loc.x += ((k % 13) as i32 - 6) * (view.scale as i32).max(1);
-                    alpha = 0.55 + (k % 45) as f32 / 100.0;
+                    alpha *= 0.55 + (k % 45) as f32 / 100.0;
                 }
             }
             let geo = w.window.geometry();

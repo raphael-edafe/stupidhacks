@@ -56,13 +56,15 @@ pub struct Game {
 impl Game {
     pub fn new(seed: u64) -> Self {
         let world = World::generate(seed);
+        let sprites = Sprites::new();
+        ui::set_icons(sprites.app_icons.clone());
         let player = Player::new(&world);
         let (cx, cy) = player.center();
         let mut cam = Camera::new(cx, cy);
         cam.follow(cx, cy, 10.0, &world); // snap into bounds
         Game {
             world,
-            sprites: Sprites::new(),
+            sprites,
             cam,
             player,
             screens: Screens::new(),

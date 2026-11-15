@@ -397,7 +397,7 @@ fn headless(seed: u64, dir: &str) {
         input.lmb = false;
         // Mine the tile just below-right of the player.
         if during(2.6, 3.9, t) {
-            let (wx, wy) = (pcx + 20.0, pcy + 18.0);
+            let (wx, wy) = (pcx + 20.0, pcy + 28.0);
             input.mouse_x = wx - g.cam.x;
             input.mouse_y = wy - g.cam.y;
             input.lmb = true;

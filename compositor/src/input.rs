@@ -94,7 +94,8 @@ impl Siege {
                 let pos = pointer.current_location();
 
                 if state == ButtonState::Pressed {
-                    let under = if self.game_drag { None } else { self.surface_under(pos, out_size.0, out_size.1) };
+                    let game_owns_mouse = self.game_drag || self.game.screens.build_mode;
+                    let under = if game_owns_mouse { None } else { self.surface_under(pos, out_size.0, out_size.1) };
                     match under {
                         Some((idx, _surface, _)) => {
                             // Click on a window: focus it (unless it already has focus).
@@ -167,7 +168,7 @@ impl Siege {
         self.input.mouse_x = vx;
         self.input.mouse_y = vy;
         let Some(pointer) = self.seat.get_pointer() else { return };
-        let under: Option<(WlSurface, Point<f64, Logical>)> = if self.game_drag {
+        let under: Option<(WlSurface, Point<f64, Logical>)> = if self.game_drag || self.game.screens.build_mode {
             None
         } else {
             self.surface_under(pos, out_size.0, out_size.1).map(|(_, s, o)| (s, o))
