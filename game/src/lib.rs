@@ -161,7 +161,7 @@ impl GameApi for Game {
         {
             let mut c = Canvas::new(rgba_buf, w, h);
             c.clear(rgba(0, 0, 0, 0));
-            render::draw_tiles(&mut c, &self.world, &self.sprites, &self.cam);
+            render::draw_tiles_t(&mut c, &self.world, &self.sprites, &self.cam, self.time);
             self.screens.draw_world(&mut c, &self.cam);
             self.light.update(
                 &self.world,
@@ -179,7 +179,13 @@ impl GameApi for Game {
         self.sky_buf.resize(n, 0);
         {
             let mut sc = Canvas::new(&mut self.sky_buf, w, h);
-            let art = sky::SkyArt::default();
+            let sp = &self.sprites;
+            let art = sky::SkyArt {
+                parallax: [Some(&sp.parallax[0]), Some(&sp.parallax[1]), Some(&sp.parallax[2])],
+                clouds: &sp.clouds,
+                sun: Some(&sp.sun),
+                moon: Some(&sp.moon),
+            };
             self.sky.draw(&mut sc, &self.cam, &self.world, &art);
         }
         if self.vignette_size != (w, h) {
