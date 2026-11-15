@@ -4,7 +4,7 @@
 //!   cargo run -p compositor --release -- --no-kill    # destroyed screens don't close apps
 //!
 //! Test hooks (for automated checks):
-//!   --autolaunch N          build a screen automatically and launch APPS[N] into it
+//!   --autolaunch N          build a screen automatically and launch favourite N (0 = Firefox) into it
 //!   --shot SECS:PATH        save a PNG of the output at SECS (repeatable); quits after the last
 
 mod handlers;

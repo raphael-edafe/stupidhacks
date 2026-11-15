@@ -1,0 +1,9 @@
+[package]
+name = "apps"
+version.workspace = true
+edition.workspace = true
+
+# Installed-app catalog: scans XDG .desktop files and resolves 16x16 icons.
+# std + png only (no Smithay), so the game preview can use it too.
+[dependencies]
+png = "0.18.1"

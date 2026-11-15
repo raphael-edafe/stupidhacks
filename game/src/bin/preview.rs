@@ -4,14 +4,17 @@
 //!   cargo run -p game --bin preview --release -- --scale 3 # 1920x1080
 //!   cargo run -p game --bin preview --release -- --shots out/   # headless scripted demo -> PNGs
 //!
-//! A fake compositor stands in for the real one: `LaunchApp` maps a fake
-//! window for `APPS[app]` 0.8 s later, `CloseApp`/`ScreenDestroyed` remove it,
+//! The launcher offers the real installed apps (`apps::scan()`), like the
+//! compositor. A fake compositor stands in for the real one: `LaunchApp` maps a
+//! fake window for that catalog entry 0.8 s later, `CloseApp`/`ScreenDestroyed` remove it,
 //! `FocusScreen` takes keyboard focus away from the game (Esc gives it back
 //! and sends Key::Escape for one tick). Quit with Ctrl+Q or by closing the window.
 
 use game::{Game, DEFAULT_SEED};
-use shared::{GameApi, GameEvent, InputState, Key, ScreenId, ScreenInfo, APPS, LAYER_BYTES, VIEW_H, VIEW_W};
+use shared::{AppInfo, GameApi, GameEvent, InputState, Key, ScreenId, ScreenInfo, LAYER_BYTES, VIEW_H, VIEW_W};
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 const DT: f32 = 1.0 / 60.0;
@@ -24,6 +27,64 @@ struct FakeCompositor {
     windows: HashMap<ScreenId, usize>,        // id -> app index
     /// Screen whose window has keyboard focus (None = the game has it).
     focus: Option<ScreenId>,
+    /// The catalog given to the game (LaunchApp indexes into it).
+    apps: Vec<AppInfo>,
+}
+
+/// Fake window styles.
+const K_TERMINAL: usize = 0;
+const K_FILES: usize = 1;
+const K_EDITOR: usize = 2;
+const K_CALC: usize = 3;
+const K_MONITOR: usize = 4;
+const K_MATRIX: usize = 5;
+const K_BROWSER: usize = 6;
+const K_GENERIC: usize = 7;
+
+/// Which fake window to draw for a catalog app (by desktop id / name).
+fn fake_kind(app: Option<&AppInfo>) -> usize {
+    let Some(a) = app else { return K_GENERIC };
+    let id = a.id.to_ascii_lowercase();
+    let name = a.name.to_ascii_lowercase();
+    if id.contains("firefox") || id.contains("chrom") || name.contains("browser") {
+        K_BROWSER
+    } else if id == "foot" || id.contains("terminal") || id.contains("ptyxis") {
+        K_TERMINAL
+    } else if id.contains("nautilus") {
+        K_FILES
+    } else if id.contains("texteditor") {
+        K_EDITOR
+    } else if id.contains("calculator") {
+        K_CALC
+    } else if id.contains("system-monitor") || id.contains("systemmonitor") || id == "htop" {
+        K_MONITOR
+    } else if id.contains("cmatrix") {
+        K_MATRIX
+    } else {
+        K_GENERIC
+    }
+}
+
+/// Load the installed-app catalog into the game (falls back to the static list).
+fn load_catalog(g: &mut Game) -> Vec<AppInfo> {
+    let infos: Vec<AppInfo> = apps::scan()
+        .into_iter()
+        .map(|a| AppInfo { id: a.id, name: a.name, icon: a.icon, favourite: a.favourite })
+        .collect();
+    g.set_app_catalog(infos);
+    println!("[preview] app catalog: {} apps", g.screens.catalog.len());
+    g.screens.catalog.clone()
+}
+
+/// minifb text input: typed characters, drained into `Game::text_input`.
+struct TextSink(Rc<RefCell<String>>);
+
+impl minifb::InputCallback for TextSink {
+    fn add_char(&mut self, uni_char: u32) {
+        if let Some(ch) = char::from_u32(uni_char).filter(|c| !c.is_control()) {
+            self.0.borrow_mut().push(ch);
+        }
+    }
 }
 
 impl FakeCompositor {
@@ -31,14 +92,14 @@ impl FakeCompositor {
         for e in events {
             match e {
                 GameEvent::LaunchApp { id, app } => {
-                    let name = APPS.get(app).map(|a| a.name).unwrap_or("?");
+                    let name = self.apps.get(app).map(|a| a.name.as_str()).unwrap_or("?");
                     println!("[compositor] launch {name} into screen {id}");
                     self.pending.insert(id, (app, MAP_DELAY));
                 }
                 GameEvent::CloseApp { id } | GameEvent::ScreenDestroyed { id } => {
                     self.pending.remove(&id);
                     if let Some(app) = self.windows.remove(&id) {
-                        let name = APPS.get(app).map(|a| a.name).unwrap_or("?");
+                        let name = self.apps.get(app).map(|a| a.name.as_str()).unwrap_or("?");
                         println!("[compositor] screen {id}: close {name}");
                     }
                     if self.focus == Some(id) {
@@ -74,8 +135,8 @@ impl FakeCompositor {
     }
 }
 
-/// Fake window contents per APPS index.
-fn fake_lines(app: usize, t: f32) -> Vec<String> {
+/// Fake window contents per fake kind.
+fn fake_lines(app: usize, name: &str, t: f32) -> Vec<String> {
     let cpu = 30 + ((t * 2.3).sin() * 12.0) as i32;
     let bar = |p: i32| format!("[{:<14}{:>3}%]", "|".repeat((p / 7).clamp(0, 14) as usize), p);
     match app {
@@ -95,18 +156,18 @@ fn fake_lines(app: usize, t: f32) -> Vec<String> {
             " 4096 user    0.7 mobs".to_string(),
             " 8192 root    0.1 systemd".to_string(),
         ],
-        _ => Vec::new(),
+        K_BROWSER => Vec::new(),
+        _ => vec![name.to_uppercase(), String::new(), "THIS WOULD BE THE".into(), "REAL APP WINDOW".into(), "IN THE COMPOSITOR".into()],
     }
 }
 
 /// Draw a fake app window into the composited RGBA buffer (view resolution), at `s.rect`.
-fn draw_fake_window(buf: &mut [u8], vw: u32, vh: u32, s: &ScreenInfo, app: usize, t: f32) {
+fn draw_fake_window(buf: &mut [u8], vw: u32, vh: u32, s: &ScreenInfo, name: &str, app: usize, t: f32) {
     let mut c = game::gfx::Canvas::new(buf, vw, vh);
     let r = s.rect;
     if r.w < 8 || r.h < 8 {
         return;
     }
-    let name = APPS.get(app).map(|a| a.name).unwrap_or("App");
     // Zoomed windows get bigger text, like a real app after the resize configure.
     let sc = if r.w >= 400 { 2 } else { 1 };
     let bg = match app {
@@ -142,6 +203,21 @@ fn draw_fake_window(buf: &mut [u8], vw: u32, vh: u32, s: &ScreenInfo, app: usize
                 }
             }
         }
+        K_BROWSER => {
+            // Browser: URL bar + a page of blocks.
+            let pad = 3 * sc;
+            c.fill_rect(r.x + pad, r.y + tb + pad, r.w - 2 * pad, 7 * sc, [235, 238, 245, 255]);
+            c.text(r.x + pad + 3, r.y + tb + pad + sc, "HTTPS://DESKTOP-SIEGE.GAME", sc, [60, 70, 100, 255]);
+            let py = r.y + tb + 2 * pad + 7 * sc;
+            c.fill_rect(r.x, py, r.w, r.y + r.h - py, [246, 246, 250, 255]);
+            c.fill_rect(r.x + 8 * sc, py + 6 * sc, (r.w / 2).max(4), 6 * sc, [255, 120, 40, 255]);
+            for i in 0..6 {
+                let y = py + 18 * sc + i * 7 * sc;
+                if y + 3 * sc < r.y + r.h {
+                    c.fill_rect(r.x + 8 * sc, y, (r.w - 16 * sc) * (6 + i % 3) / 9, 3 * sc, [190, 196, 210, 255]);
+                }
+            }
+        }
         5 => {
             // Matrix rain.
             let cols = ((r.w - 4) / (4 * sc)).max(0);
@@ -167,7 +243,7 @@ fn draw_fake_window(buf: &mut [u8], vw: u32, vh: u32, s: &ScreenInfo, app: usize
                 2 => [220, 220, 240, 255],
                 _ => [200, 230, 200, 255],
             };
-            for (i, l) in fake_lines(app, t).iter().enumerate() {
+            for (i, l) in fake_lines(app, name, t).iter().enumerate() {
                 let y = r.y + tb + 4 + i as i32 * line_h;
                 if y + 5 * sc < r.y + r.h {
                     let l: String = l.chars().take(max_chars).collect();
@@ -199,7 +275,9 @@ fn composite(g: &mut Game, fake: &FakeCompositor, world: &mut Vec<u8>, fx: &mut 
     infos.sort_by(|a, b| a.zoom.total_cmp(&b.zoom));
     for s in infos {
         if let Some(&app) = fake.windows.get(&s.id) {
-            draw_fake_window(out, vw, vh, &s, app, t);
+            let info = fake.apps.get(app);
+            let name = info.map(|a| a.name.as_str()).unwrap_or("App");
+            draw_fake_window(out, vw, vh, &s, name, fake_kind(info), t);
         }
     }
     let mut c = game::gfx::Canvas::new(out, vw, vh);
@@ -237,7 +315,9 @@ fn interactive(seed: u64, scale: usize) {
     window.set_target_fps(0); // we pace ourselves
 
     let mut g = Game::new(seed);
-    let mut fake = FakeCompositor::default();
+    let mut fake = FakeCompositor { apps: load_catalog(&mut g), ..Default::default() };
+    let typed = Rc::new(RefCell::new(String::new()));
+    window.set_input_callback(Box::new(TextSink(typed.clone())));
     let (mut world, mut fx, mut out) = (vec![0u8; LAYER_BYTES], vec![0u8; LAYER_BYTES], vec![0u8; LAYER_BYTES]);
     let mut frame = vec![0u32; w * h];
     let mut input = InputState::default();
@@ -270,7 +350,20 @@ fn interactive(seed: u64, scale: usize) {
         (Key::Hotbar4, &[K::Key4][..]),
         (Key::Hotbar5, &[K::Key5][..]),
         (Key::Hotbar6, &[K::Key6][..]),
+        (Key::Enter, &[K::Enter, K::NumPadEnter][..]),
+        (Key::Backspace, &[K::Backspace][..]),
+        (Key::Smash, &[K::Q][..]),
+        (Key::ZoomOut, &[K::Minus][..]),
+        (Key::ZoomIn, &[K::Equal][..]),
     ];
+    // Keys that still work while the launcher search takes text (letters,
+    // space and number row become text instead; digits also pick favourites).
+    let text_safe = |k: K| {
+        matches!(
+            k,
+            K::Left | K::Right | K::Up | K::Down | K::Escape | K::Enter | K::NumPadEnter | K::Backspace | K::F1 | K::Key1 | K::Key2 | K::Key3 | K::Key4 | K::Key5 | K::Key6
+        )
+    };
 
     while window.is_open() {
         let ctrl = window.is_key_down(K::LeftCtrl) || window.is_key_down(K::RightCtrl);
@@ -285,8 +378,16 @@ fn interactive(seed: u64, scale: usize) {
         }
         let app_focused = fake.focus.is_some();
         input.game_focused = !app_focused;
+        let text_mode = g.wants_text() && !app_focused;
+        {
+            let mut buf = typed.borrow_mut();
+            if text_mode && !buf.is_empty() && !ctrl {
+                g.text_input(&buf);
+            }
+            buf.clear();
+        }
         for (k, keys) in map.iter() {
-            input.set(*k, !app_focused && keys.iter().any(|kk| window.is_key_down(*kk)));
+            input.set(*k, !app_focused && keys.iter().any(|kk| (!text_mode || text_safe(*kk)) && window.is_key_down(*kk)));
         }
         if escape_tick {
             input.set(Key::Escape, true);
@@ -358,10 +459,16 @@ fn headless(seed: u64, dir: &str) {
         return;
     }
     let mut g = Game::new(seed);
-    let mut fake = FakeCompositor::default();
+    let mut fake = FakeCompositor { apps: load_catalog(&mut g), ..Default::default() };
     let (mut world, mut fx, mut out) = (vec![0u8; LAYER_BYTES], vec![0u8; LAYER_BYTES], vec![0u8; LAYER_BYTES]);
     let mut input = InputState::default();
     let mut t = 0.0f32;
+    // Everything after the launcher search is shifted by this much (s).
+    const S: f32 = 1.6;
+    // Launcher script: favourites shot, type "fire", Backspace x4, type "calc", Enter.
+    let typing: &[(f32, &str)] = &[(7.5, "f"), (7.56, "i"), (7.62, "r"), (7.68, "e"), (8.45, "c"), (8.51, "a"), (8.57, "l"), (8.63, "c")];
+    let mut next_typed = 0;
+    let taps: &[(f32, Key)] = &[(8.0, Key::Backspace), (8.08, Key::Backspace), (8.16, Key::Backspace), (8.24, Key::Backspace), (8.85, Key::Enter)];
     let mut draw_time = Duration::ZERO;
     let mut draws = 0u32;
     let mut screen_id: Option<ScreenId> = None;
@@ -377,26 +484,28 @@ fn headless(seed: u64, dir: &str) {
         (5.35, "04_build_drag"),
         (6.0, "05_building"),
         (6.62, "06a_chooser_pop"),
-        (7.3, "06_chooser"),
-        (8.3, "07_launching"),
-        (9.6, "08_online"),
-        (12.0, "09_prompt"),
-        (12.37, "10_zoom_mid"),
-        (12.9, "11_zoom_full"),
-        (14.2, "12_zoomed_out"),
-        (14.85, "13_crt_close"),
-        (15.45, "13a_empty"),
-        (16.0, "14_chooser_again"),
-        (18.0, "15_second_app"),
-        (21.0, "16_dusk"),
-        (24.5, "17_night"),
-        (26.0, "18_cracked"),
-        (27.6, "19_dying"),
-        (28.33, "20_explosion"),
-        (30.5, "21_after"),
+        (7.3, "06_launcher_favourites"),
+        (7.9, "06b_search_fire"),
+        (8.75, "06c_search_calc"),
+        (9.25, "07_launching"),
+        (9.6 + S, "08_online"),
+        (12.0 + S, "09_prompt"),
+        (12.37 + S, "10_zoom_mid"),
+        (12.9 + S, "11_zoom_full"),
+        (14.2 + S, "12_zoomed_out"),
+        (14.85 + S, "13_crt_close"),
+        (15.45 + S, "13a_empty"),
+        (16.0 + S, "14_chooser_again"),
+        (18.0 + S, "15_second_app"),
+        (21.0 + S, "16_dusk"),
+        (24.5 + S, "17_night"),
+        (26.0 + S, "18_cracked"),
+        (27.6 + S, "19_dying"),
+        (28.33 + S, "20_explosion"),
+        (30.5 + S, "21_after"),
     ];
     let mut next_shot = 0;
-    let end = 31.0;
+    let end = 31.0 + S;
 
     let tile_to_mouse = |g: &Game, x: i32, y: i32| ((x * 16 + 8) as f32 - g.cam.x, (y * 16 + 8) as f32 - g.cam.y);
     let during = |a: f32, b: f32, t: f32| (a..b).contains(&t);
@@ -404,8 +513,8 @@ fn headless(seed: u64, dir: &str) {
     while t < end {
         // --- script ---
         input.set(Key::Escape, false);
-        input.set(Key::Right, during(1.0, 2.2, t) || during(10.8, 11.5, t));
-        input.set(Key::Left, during(9.7, 10.5, t));
+        input.set(Key::Right, during(1.0, 2.2, t) || during(10.8 + S, 11.5 + S, t));
+        input.set(Key::Left, during(9.7 + S, 10.5 + S, t));
         input.set(Key::Jump, during(1.6, 1.8, t));
         let (pcx, pcy) = g.player.center();
         input.lmb = false;
@@ -440,29 +549,35 @@ fn headless(seed: u64, dir: &str) {
             input.mouse_y = ay + (by - ay) * f;
             input.lmb = true;
         }
-        // Chooser: glide to "Terminal", click.
-        if during(7.4, 8.0, t) {
-            if let Some((rx, ry)) = g.screens.chooser_row_center(0, &g.cam) {
-                let f = ((t - 7.4) / 0.4).min(1.0);
-                input.mouse_x += (rx - input.mouse_x) * f;
-                input.mouse_y += (ry - input.mouse_y) * f;
+        // Launcher: type into the search (like the compositor's text routing),
+        // Backspace / Enter as keys.
+        while next_typed < typing.len() && t >= typing[next_typed].0 {
+            if g.wants_text() {
+                g.text_input(typing[next_typed].1);
             }
-            input.lmb = during(7.9, 7.95, t);
+            next_typed += 1;
+        }
+        for &(at, k) in taps {
+            if during(at, at + 0.04, t) {
+                input.set(k, true);
+            } else if during(at + 0.04, at + 0.08, t) {
+                input.set(k, false);
+            }
         }
         // Zoom in, then Esc out (the fake compositor holds focus in between).
-        input.set(Key::Zoom, during(12.2, 12.25, t));
-        if during(13.6, 13.62, t) && fake.give_back_focus() {
+        input.set(Key::Zoom, during(12.2 + S, 12.25 + S, t));
+        if during(13.6 + S, 13.62 + S, t) && fake.give_back_focus() {
             input.set(Key::Escape, true);
         }
-        // Close with X, reopen the chooser with E, pick System Monitor with 5.
-        input.set(Key::CloseApp, during(14.6, 14.65, t));
-        input.set(Key::Interact, during(15.6, 15.65, t));
-        input.set(Key::Hotbar5, during(16.3, 16.35, t));
-        input.set(Key::Night, during(17.5, 17.6, t));
+        // Close with X, reopen the launcher with E, pick favourite 6 (System Monitor).
+        input.set(Key::CloseApp, during(14.6 + S, 14.65 + S, t));
+        input.set(Key::Interact, during(15.6 + S, 15.65 + S, t));
+        input.set(Key::Hotbar6, during(16.3 + S, 16.35 + S, t));
+        input.set(Key::Night, during(17.5 + S, 17.6 + S, t));
         input.game_focused = fake.focus.is_none();
         // Mobs are stubbed: simulate attacks from the left side at night.
         if let Some(id) = screen_id {
-            if t > 23.5 && ((t * 60.0) as i32) % 14 == 0 {
+            if t > 23.5 + S && ((t * 60.0) as i32) % 14 == 0 {
                 let r = g.screens.list.iter().find(|s| s.id == id).map(|s| s.frame_px());
                 if let Some((x, y, _, h)) = r {
                     let hy = y + h * (0.3 + 0.5 * ((t * 3.7).sin() * 0.5 + 0.5));

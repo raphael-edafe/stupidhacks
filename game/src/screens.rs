@@ -6,7 +6,8 @@
 //!
 //! Interaction flow (compositor side in brackets):
 //!   B + drag -> frame builds -> `ScreenBuilt` -> "OPEN APP" chooser pops up
-//!   pick (click / 1-5 / arrows+E) -> `LaunchApp` -> "LAUNCHING ..." panel
+//!   type to search, pick (click / Enter / 1-6 on an empty query) -> `LaunchApp`
+//!   (an index into the app catalog) -> "LAUNCHING ..." panel
 //!   [window maps -> set_screen_occupied(id, true)] -> CRT power-on
 //!   near a screen: E opens the chooser (empty), Z zooms (occupied), X closes
 //!   Z -> `FocusScreen`, rect grows to ZOOM_RECT over ZOOM_TIME
@@ -19,7 +20,7 @@ use crate::input::Controls;
 use crate::particles::Particles;
 use crate::ui;
 use crate::world::{hash2, Tile, World, TILE};
-use shared::{GameEvent, Key, Rect, ScreenId, ScreenInfo, APPS, VIEW_H, VIEW_W};
+use shared::{AppInfo, GameEvent, Key, Rect, ScreenId, ScreenInfo, VIEW_H, VIEW_W};
 
 pub const MIN_W: i32 = 8;
 pub const MIN_H: i32 = 6;
@@ -181,6 +182,27 @@ pub struct Chooser {
     closing: Option<f32>,
 }
 
+/// Launcher search state (the open `Chooser`'s query and results).
+#[derive(Clone, Debug, Default)]
+struct Launcher {
+    query: String,
+    /// Catalog indices in display order.
+    results: Vec<usize>,
+    /// First visible result.
+    scroll: usize,
+}
+
+impl Launcher {
+    fn reset(&mut self, apps: &[AppInfo]) {
+        self.query.clear();
+        self.refresh(apps);
+    }
+    fn refresh(&mut self, apps: &[AppInfo]) {
+        self.results = ui::search(apps, &self.query);
+        self.scroll = 0;
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Zoom {
     pub id: ScreenId,
@@ -212,6 +234,9 @@ pub struct Screens {
     /// World size in tiles (drag rects are clipped to it; 0 = unknown).
     bounds: (i32, i32),
     pub chooser: Option<Chooser>,
+    /// Apps the launcher offers; `Screen::app` and `LaunchApp` index into it.
+    pub catalog: Vec<AppInfo>,
+    launcher: Launcher,
     pub zoom: Option<Zoom>,
     /// Nearest screen in prompt range.
     pub near: Option<ScreenId>,
@@ -223,7 +248,7 @@ pub struct Screens {
 
 impl Screens {
     pub fn new() -> Self {
-        Screens { next_id: 1, ..Default::default() }
+        Screens { next_id: 1, catalog: ui::fallback_catalog(), ..Default::default() }
     }
 
     /// Ghost rect being dragged, normalised: (tx, ty, tw, th). It grows from the
@@ -327,9 +352,63 @@ impl Screens {
     pub fn open_chooser(&mut self, id: ScreenId) {
         if self.find(id).is_some_and(|s| s.is_empty()) {
             self.chooser = Some(Chooser { id, t: 0.0, hover: 0, closing: None });
+            self.launcher.reset(&self.catalog);
             self.build_mode = false;
             self.drag_start = None;
         }
+    }
+
+    /// Replace the app catalog (empty = back to the `shared::APPS` fallback).
+    pub fn set_catalog(&mut self, apps: Vec<AppInfo>) {
+        self.catalog = if apps.is_empty() { ui::fallback_catalog() } else { apps };
+        self.launcher.reset(&self.catalog);
+        if let Some(c) = &mut self.chooser {
+            c.hover = 0;
+        }
+    }
+
+    /// The launcher is open and takes typed text.
+    pub fn wants_text(&self) -> bool {
+        self.chooser.is_some_and(|c| c.closing.is_none())
+    }
+
+    /// Typed text for the launcher search. A digit 1-6 on an empty query is
+    /// left to the Hotbar keys (they pick favourites).
+    pub fn text_input(&mut self, text: &str) {
+        if !self.wants_text() {
+            return;
+        }
+        let mut changed = false;
+        for ch in text.chars() {
+            let q = &mut self.launcher.query;
+            if ch.is_control() || (q.is_empty() && (ch == ' ' || ('1'..='6').contains(&ch))) {
+                continue;
+            }
+            if q.chars().count() >= ui::MAX_QUERY {
+                break;
+            }
+            q.push(ch);
+            changed = true;
+        }
+        if changed {
+            self.launcher.refresh(&self.catalog);
+            if let Some(c) = &mut self.chooser {
+                c.hover = 0;
+            }
+        }
+    }
+
+    pub fn launcher_query(&self) -> &str {
+        &self.launcher.query
+    }
+
+    /// Current launcher results (catalog indices, display order).
+    pub fn launcher_results(&self) -> &[usize] {
+        &self.launcher.results
+    }
+
+    pub fn launcher_scroll(&self) -> usize {
+        self.launcher.scroll
     }
 
     /// Player closes the app on a screen by hand.
@@ -383,11 +462,12 @@ impl Screens {
         (px, py, pw, ph)
     }
 
-    /// View-px centre of chooser row `i` (scripting / tests).
+    /// View-px centre of visible launcher row `i` (scripting / tests).
     pub fn chooser_row_center(&self, i: usize, cam: &Camera) -> Option<(f32, f32)> {
         let ch = self.chooser?;
         let s = self.find(ch.id)?;
-        let (x, y, w, h) = ui::row_rect(self.chooser_rect(s, cam), i);
+        let bar = self.launcher.results.len() > ui::VISIBLE_ROWS;
+        let (x, y, w, h) = ui::row_rect(self.chooser_rect(s, cam), i, bar);
         Some(((x + w / 2) as f32, (y + h / 2) as f32))
     }
 
@@ -500,41 +580,72 @@ impl Screens {
             return;
         };
         let rect = self.chooser_rect(s, cam);
-        let n = APPS.len();
-        let (mx, my) = ctl.mouse();
-        let mouse_row = (0..n).find(|&i| {
-            let (x, y, w, h) = ui::row_rect(rect, i);
-            mx >= x as f32 && my >= y as f32 && mx < (x + w) as f32 && my < (y + h + 2) as f32
-        });
-        let moved = ctl.cur.mouse_x != ctl.prev.mouse_x || ctl.cur.mouse_y != ctl.prev.mouse_y;
         let mut hover = ch.hover;
+        if ctl.pressed(Key::Backspace) && self.launcher.query.pop().is_some() {
+            self.launcher.refresh(&self.catalog);
+            hover = 0;
+        }
+        let n = self.launcher.results.len();
+        let rows = ui::VISIBLE_ROWS;
+        let bar = n > rows;
+        let scroll = self.launcher.scroll;
+        let (mx, my) = ctl.mouse();
+        let mouse_row = (0..rows.min(n.saturating_sub(scroll)))
+            .find(|&v| {
+                let (x, y, w, h) = ui::row_rect(rect, v, bar);
+                mx >= x as f32 && my >= y as f32 && mx < (x + w) as f32 && my < (y + h + 2) as f32
+            })
+            .map(|v| scroll + v);
+        let moved = ctl.cur.mouse_x != ctl.prev.mouse_x || ctl.cur.mouse_y != ctl.prev.mouse_y;
         if moved {
             if let Some(i) = mouse_row {
                 hover = i;
             }
         }
-        if ctl.pressed(Key::Up) {
-            hover = (hover + n - 1) % n;
+        if n > 0 {
+            let keys = ctl.pressed(Key::Down) as i32 - ctl.pressed(Key::Up) as i32;
+            let wheel = -(ctl.cur.wheel.round() as i32); // wheel up = towards the top
+            // Arrow keys wrap around; the wheel stops at the ends.
+            let mut h = hover.min(n - 1) as i32;
+            if keys != 0 {
+                h = (h + keys).rem_euclid(n as i32);
+            }
+            h = (h + wheel).clamp(0, n as i32 - 1);
+            hover = h as usize;
+        } else {
+            hover = 0;
         }
-        if ctl.pressed(Key::Down) {
-            hover = (hover + 1) % n;
+        // Keep the highlight visible.
+        let mut scroll = scroll;
+        if hover < scroll {
+            scroll = hover;
+        } else if hover >= scroll + rows {
+            scroll = hover + 1 - rows;
         }
-        let mut pick = None;
-        for (i, k) in [Key::Hotbar1, Key::Hotbar2, Key::Hotbar3, Key::Hotbar4, Key::Hotbar5, Key::Hotbar6].iter().enumerate() {
-            if ctl.pressed(*k) && i < n {
-                pick = Some(i);
+        self.launcher.scroll = scroll.min(n.saturating_sub(rows));
+
+        let mut pick: Option<usize> = None; // catalog index
+        if self.launcher.query.is_empty() {
+            for (i, k) in [Key::Hotbar1, Key::Hotbar2, Key::Hotbar3, Key::Hotbar4, Key::Hotbar5, Key::Hotbar6].iter().enumerate() {
+                if ctl.pressed(*k) {
+                    if let Some(p) = self.launcher.results.iter().position(|&a| self.catalog.get(a).is_some_and(|ap| ap.favourite == Some(i as u8))) {
+                        hover = p;
+                        pick = Some(self.launcher.results[p]);
+                    }
+                }
             }
         }
-        if ctl.pressed(Key::Interact) {
-            pick = Some(hover);
+        if ctl.pressed(Key::Enter) {
+            pick = self.launcher.results.get(hover).copied();
         }
         if ctl.lmb_pressed() && !self.swallow {
             if let Some(i) = mouse_row {
-                pick = Some(i);
+                hover = i;
+                pick = self.launcher.results.get(i).copied();
             }
         }
         if let Some(c) = &mut self.chooser {
-            c.hover = pick.unwrap_or(hover);
+            c.hover = hover;
         }
         if let Some(app) = pick {
             let id = ch.id;
@@ -783,7 +894,7 @@ impl Screens {
             // Name plate on the top bar.
             if !building {
                 let label = match s.app {
-                    Some(a) if s.occupied => ui::app_label(a),
+                    Some(a) if s.occupied => ui::ellipsize(&ui::app_label(&self.catalog, a), s.tw * TILE - 24),
                     _ => format!("SCR-{:02}", s.id),
                 };
                 let (fx, fy) = cam.to_view((s.tx * TILE) as f32, (s.ty * TILE) as f32);
@@ -818,10 +929,10 @@ impl Screens {
             let bob = ((lt * 4.0).sin() * 1.5).round() as i32;
             let top = (cy - 22).max(y + 13);
             c.glow(cx, top + 8, 14, rgba(90, 240, 160, 50));
-            ui::draw_app_icon(c, app, cx - 8, top + bob);
+            ui::draw_app_icon(c, &self.catalog, app, cx - 8, top + bob);
             let dots = ".".repeat(1 + ((lt * 3.0) as usize % 3));
             c.text_centered(cx, top + 21, "LAUNCHING", 1, green);
-            let label = ui::app_label(app);
+            let label = ui::ellipsize(&ui::app_label(&self.catalog, app), (w - 20).max(30) - 11);
             let nw = text_width(&label, 1) + 11;
             c.text_shadow(cx - nw / 2, top + 29, &format!("{label}{dots}"), 1, rgb(220, 255, 235));
             // Spinner bar.
@@ -1032,7 +1143,14 @@ impl Screens {
             // Dim the screen behind the panel a touch so it reads as modal.
             let (vx, vy, iw, ih) = s.interior_view(cam);
             c.fill_rect(vx, vy, iw, ih, rgba(0, 0, 0, (90.0 * alpha) as u8));
-            ui::draw_chooser(c, rect, scale, alpha, content, Some(ch.hover), self.time);
+            let view = ui::LauncherView {
+                apps: &self.catalog,
+                results: &self.launcher.results,
+                query: &self.launcher.query,
+                hover: ch.hover,
+                scroll: self.launcher.scroll,
+            };
+            ui::draw_chooser(c, rect, scale, alpha, content, &view, self.time);
         }
     }
 
@@ -1088,7 +1206,7 @@ impl Screens {
         let ha = ui::clamp01((z - 0.5) * 2.0);
         if ha > 0.0 {
             let y = r.y + r.h + 3;
-            let label = s.app.map(ui::app_label).unwrap_or_else(|| format!("SCR-{:02}", s.id));
+            let label = s.app.map(|a| ui::app_label(&self.catalog, a)).unwrap_or_else(|| format!("SCR-{:02}", s.id));
             c.text_shadow(r.x + 1, y + 3, &label, 1, ui::fade(accent, ha));
             let hint = "BACK TO WORLD";
             let total = text_width("ESC", 1) + 6 + 4 + text_width(hint, 1);

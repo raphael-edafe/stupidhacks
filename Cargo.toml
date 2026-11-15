@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["shared", "game", "compositor"]
+members = ["shared", "apps", "game", "compositor"]
 
 [workspace.package]
 edition = "2021"

@@ -233,6 +233,18 @@ impl GameApi for Game {
     fn view_size(&self) -> (u32, u32) {
         (self.cam.vw as u32, self.cam.vh as u32)
     }
+
+    fn set_app_catalog(&mut self, apps: Vec<shared::AppInfo>) {
+        self.screens.set_catalog(apps);
+    }
+
+    fn wants_text(&self) -> bool {
+        self.screens.wants_text()
+    }
+
+    fn text_input(&mut self, text: &str) {
+        self.screens.text_input(text);
+    }
 }
 
 /// Put the sky behind the terrain (alpha 0 = sky, 255 = terrain, partial =

@@ -32,7 +32,7 @@ use smithay::{
 };
 use tracing::{info, warn};
 
-use shared::{GameApi, GameEvent, InputState, Key, ScreenId, ScreenInfo, APPS, VIEW_H, VIEW_W};
+use shared::{AppInfo, GameApi, GameEvent, InputState, Key, ScreenId, ScreenInfo, APPS, VIEW_H, VIEW_W};
 
 use crate::CalloopData;
 
@@ -121,6 +121,9 @@ pub struct Siege {
     pub frame: u64,
     /// Test hook: press this key on the game's chooser at this time (autolaunch).
     pub autopick: Option<(Instant, Key, u8)>,
+    /// Installed apps, same order as the catalog given to the game
+    /// (`GameEvent::LaunchApp { app }` indexes into it).
+    pub catalog: Vec<apps::App>,
 }
 
 impl Siege {
@@ -142,6 +145,11 @@ impl Siege {
         let socket_name = Self::init_wayland_listener(display, event_loop);
         let mut input = InputState::default();
         input.game_focused = true;
+        let catalog = load_catalog();
+        let mut game = game::Game::new(game::DEFAULT_SEED);
+        game.set_app_catalog(
+            catalog.iter().map(|a| AppInfo { id: a.id.clone(), name: a.name.clone(), icon: a.icon.clone(), favourite: a.favourite }).collect(),
+        );
 
         Siege {
             start_time: Instant::now(),
@@ -163,7 +171,7 @@ impl Siege {
             children: Vec::new(),
             app_focus: None,
             game_drag: false,
-            game: game::Game::new(game::DEFAULT_SEED),
+            game,
             input,
             escape_pulse: false,
             screens: Vec::new(),
@@ -171,6 +179,7 @@ impl Siege {
             opts,
             frame: 0,
             autopick: None,
+            catalog,
         }
     }
 
@@ -285,30 +294,42 @@ impl Siege {
         }
     }
 
-    /// Spawn APPS[app] for a screen. Its first new toplevel gets bound to the screen.
+    /// Spawn catalog[app] for a screen. Its first new toplevel gets bound to the screen.
     pub fn launch(&mut self, screen: ScreenId, app: usize) {
-        let Some(entry) = APPS.get(app) else {
+        let Some(entry) = self.catalog.get(app) else {
             warn!("unknown app index {app}");
             return;
         };
+        let mut argv = entry.exec.clone();
+        if entry.is_firefox() {
+            firefox_args(&mut argv);
+        }
+        if argv.is_empty() {
+            warn!("{}: empty command line", entry.name);
+            return;
+        }
         // GTK apps are single-instance over D-Bus: a private session bus makes them
         // start a fresh instance inside this compositor instead of the host desktop's.
-        let use_dbus = !entry.command.first().is_some_and(|c| *c == "foot") && which("dbus-run-session");
+        let use_dbus = entry.needs_dbus_session && which("dbus-run-session");
         let mut cmd = if use_dbus {
             let mut c = std::process::Command::new("dbus-run-session");
-            c.arg("--").args(entry.command);
+            c.arg("--").args(&argv);
             c
         } else {
-            let mut c = std::process::Command::new(entry.command[0]);
-            c.args(&entry.command[1..]);
+            let mut c = std::process::Command::new(&argv[0]);
+            c.args(&argv[1..]);
             c
         };
+        info!("launch {}: {}{:?}", entry.name, if use_dbus { "dbus-run-session -- " } else { "" }, argv);
         // Own process group, so the whole tree (dbus-run-session's private bus and
         // the services it activates) can be terminated together; see kill_tree().
         std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
         cmd.env("WAYLAND_DISPLAY", &self.socket_name)
             .env_remove("DISPLAY")
             .env("GDK_BACKEND", "wayland")
+            .env("MOZ_ENABLE_WAYLAND", "1")
+            .env("QT_QPA_PLATFORM", "wayland")
+            .env("SDL_VIDEODRIVER", "wayland")
             .env("GSK_RENDERER", "cairo")
             .env("XDG_CURRENT_DESKTOP", "DesktopSiege")
             .stdin(std::process::Stdio::null())
@@ -610,7 +631,81 @@ pub fn kill_tree(child: &mut Child) {
 }
 
 fn which(bin: &str) -> bool {
-    std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(bin).is_file()))
+    apps::which(bin)
+}
+
+/// The installed-app catalog (favourites first). Falls back to the static
+/// `shared::APPS` list if nothing was found.
+fn load_catalog() -> Vec<apps::App> {
+    let t = Instant::now();
+    let mut list = apps::scan();
+    if list.is_empty() {
+        warn!("no .desktop apps found; using the built-in app list");
+        list = APPS
+            .iter()
+            .enumerate()
+            .map(|(i, a)| apps::App {
+                id: format!("builtin-{i}"),
+                name: a.name.to_string(),
+                icon: None,
+                favourite: Some(i as u8),
+                exec: a.command.iter().map(|s| s.to_string()).collect(),
+                needs_dbus_session: a.command.first().is_none_or(|c| *c != "foot"),
+            })
+            .collect();
+    }
+    let favs: Vec<&str> = list.iter().filter(|a| a.favourite.is_some()).map(|a| a.name.as_str()).collect();
+    info!("app catalog: {} apps in {} ms; favourites: {favs:?}", list.len(), t.elapsed().as_millis());
+    list
+}
+
+/// Firefox must start a fresh instance inside our compositor, even when the
+/// host desktop's Firefox is running: `--new-instance`, plus a dedicated
+/// profile when the default one is locked by a running Firefox.
+fn firefox_args(argv: &mut Vec<String>) {
+    if argv.iter().any(|a| a == "--new-instance" || a == "-no-remote" || a == "--no-remote") {
+        return;
+    }
+    argv.push("--new-instance".into());
+    if !host_firefox_running() {
+        return;
+    }
+    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else { return };
+    // Snap Firefox can't see hidden dirs in $HOME (~/.cache), only its own ~/snap/firefox.
+    let snap = argv.first().is_some_and(|c| c.starts_with("/snap/"));
+    let dir = if snap { home.join("snap/firefox/common/desktop-siege-profile") } else { home.join(".cache/desktop-siege/firefox-profile") };
+    if std::fs::create_dir_all(&dir).is_err() {
+        warn!("cannot create firefox profile dir {}", dir.display());
+        return;
+    }
+    let user_js = dir.join("user.js");
+    if !user_js.exists() {
+        // Skip first-run / default-browser noise in the throwaway profile.
+        let prefs = [
+            ("browser.shell.checkDefaultBrowser", "false"),
+            ("browser.aboutwelcome.enabled", "false"),
+            ("trailhead.firstrun.didSeeAboutWelcome", "true"),
+            ("browser.startup.homepage_override.mstone", "\"ignore\""),
+            ("startup.homepage_welcome_url", "\"\""),
+            ("startup.homepage_welcome_url.additional", "\"\""),
+            ("datareporting.policy.dataSubmissionPolicyBypassNotification", "true"),
+            ("browser.tabs.warnOnClose", "false"),
+            ("browser.sessionstore.resume_from_crash", "false"),
+        ];
+        let text: String = prefs.iter().map(|(k, v)| format!("user_pref(\"{k}\", {v});\n")).collect();
+        let _ = std::fs::write(&user_js, text);
+    }
+    argv.push("--profile".into());
+    argv.push(dir.to_string_lossy().into_owned());
+}
+
+/// Is a Firefox process (host desktop's or ours) running? Its default profile is then locked.
+fn host_firefox_running() -> bool {
+    let Ok(rd) = std::fs::read_dir("/proc") else { return false };
+    rd.flatten().any(|e| {
+        e.file_name().to_string_lossy().bytes().all(|b| b.is_ascii_digit())
+            && std::fs::read_to_string(e.path().join("comm")).is_ok_and(|c| matches!(c.trim(), "firefox" | "firefox-bin" | "firefox-esr"))
+    })
 }
 
 #[derive(Default)]

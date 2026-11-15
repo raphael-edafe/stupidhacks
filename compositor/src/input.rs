@@ -18,7 +18,7 @@ use smithay::{
     utils::{Logical, Point, SERIAL_COUNTER},
 };
 
-use shared::Key;
+use shared::{GameApi, Key};
 
 use crate::state::Siege;
 
@@ -69,13 +69,21 @@ impl Siege {
                 let Some(kb) = self.seat.get_keyboard() else { return };
 
                 let to_app = self.app_focus.is_some() && !(code == KEY_ESC && pressed);
-                kb.input::<(), _>(self, event.key_code(), event.state(), serial, time, |_, _, _| {
-                    if to_app {
-                        FilterResult::Forward
-                    } else {
-                        FilterResult::Intercept(())
-                    }
-                });
+                // Launcher search open: printable keys become text (xkb keysym -> UTF-8).
+                let wants_text = self.app_focus.is_none() && self.game.wants_text();
+                let text = kb
+                    .input::<Option<char>, _>(self, event.key_code(), event.state(), serial, time, |_, mods, handle| {
+                        if to_app {
+                            return FilterResult::Forward;
+                        }
+                        let ch = if pressed && wants_text && !mods.ctrl && !mods.alt && !mods.logo {
+                            handle.modified_sym().key_char().filter(|c| !c.is_control())
+                        } else {
+                            None
+                        };
+                        FilterResult::Intercept(ch)
+                    })
+                    .flatten();
                 if to_app {
                     return;
                 }
@@ -85,7 +93,17 @@ impl Siege {
                     return;
                 }
                 if let Some(k) = map_key(code) {
-                    self.input.set(k, pressed);
+                    // A key that typed text must not also act in the game (B = build,
+                    // N = night, Space = jump...). Number keys still pick favourites
+                    // (the game ignores the digit text while the query is empty).
+                    let hotbar = matches!(k, Key::Hotbar1 | Key::Hotbar2 | Key::Hotbar3 | Key::Hotbar4 | Key::Hotbar5 | Key::Hotbar6);
+                    if !(pressed && text.is_some() && !hotbar) {
+                        self.input.set(k, pressed);
+                    }
+                }
+                if let Some(ch) = text {
+                    let mut buf = [0u8; 4];
+                    self.game.text_input(ch.encode_utf8(&mut buf));
                 }
             }
             InputEvent::PointerMotionAbsolute { event, .. } => {
