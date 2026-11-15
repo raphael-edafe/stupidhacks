@@ -181,43 +181,52 @@ impl Light {
         let gw = self.gw;
         let t = TILE as i32;
 
-        // Per pixel column: left cell index and 0..256 weight of the right cell.
-        let mut col_i = vec![0usize; w];
-        let mut col_f = vec![0u32; w];
-        for px in 0..w {
-            // Cell centres are at gx0*16 + 8 + k*16 in world px.
-            let wx = ox + px as i32 - (self.gx0 * t + t / 2);
-            let i = wx.div_euclid(t).clamp(0, gw as i32 - 2) as usize;
-            let f = (wx - i as i32 * t).clamp(0, t) as u32 * 256 / t as u32;
-            col_i[px] = i;
-            col_f[px] = f;
-        }
-
         // Light as fixed point (x256), allowing a little over-brightening near torches.
-        let to_fx = |v: f32| (v.clamp(MIN_LIGHT, 1.35) * 256.0) as u32;
-        let mut row = vec![[0u32; 3]; gw];
+        let to_fx = |v: f32| (v.clamp(MIN_LIGHT, 1.35) * 256.0) as i32;
+        // World-px x of cell 0's centre, relative to the view's left edge.
+        let cx0 = self.gx0 * t + t / 2 - ox;
+        let mut row = vec![[0i32; 3]; gw];
         for py in 0..h {
             let wy = oy + py as i32 - (self.gy0 * t + t / 2);
             let j = wy.div_euclid(t).clamp(0, self.gh as i32 - 2) as usize;
-            let fy = (wy - j as i32 * t).clamp(0, t) as u32 * 256 / t as u32;
+            let fy = (wy - j as i32 * t).clamp(0, t);
             let (r0, r1) = (&self.cells[j * gw..(j + 1) * gw], &self.cells[(j + 1) * gw..(j + 2) * gw]);
             for gx in 0..gw {
                 for k in 0..3 {
                     let a = to_fx(r0[gx][k]);
                     let b = to_fx(r1[gx][k]);
-                    row[gx][k] = (a * (256 - fy) + b * fy) >> 8;
+                    row[gx][k] = a + (b - a) * fy / t;
                 }
             }
             let line = &mut c.px[py * w * 4..(py + 1) * w * 4];
-            for px in 0..w {
-                let p = &mut line[px * 4..px * 4 + 4];
-                if p[3] == 0 {
+            // Walk each 16-px span between neighbouring cell centres, stepping
+            // the light linearly (x256 fixed point, x16 sub-steps).
+            for gx in 0..gw - 1 {
+                let x_start = cx0 + gx as i32 * t;
+                let x_end = x_start + t;
+                if x_end <= 0 || x_start >= w as i32 {
                     continue;
                 }
-                let (i, f) = (col_i[px], col_f[px]);
+                let (a, b) = (row[gx], row[gx + 1]);
+                let x0 = x_start.max(0);
+                let x1 = x_end.min(w as i32);
+                let mut v = [0i32; 3];
+                let mut dv = [0i32; 3];
                 for k in 0..3 {
-                    let l = (row[i][k] * (256 - f) + row[i + 1][k] * f) >> 8;
-                    p[k] = ((p[k] as u32 * l) >> 8).min(255) as u8;
+                    dv[k] = (b[k] - a[k]) * 16 / t; // per-pixel step, x16
+                    v[k] = a[k] * 16 + dv[k] * (x0 - x_start);
+                }
+                for x in x0..x1 {
+                    let i = x as usize * 4;
+                    let p = &mut line[i..i + 4];
+                    if p[3] != 0 {
+                        for k in 0..3 {
+                            p[k] = ((p[k] as i32 * v[k]) >> 12).clamp(0, 255) as u8;
+                        }
+                    }
+                    for k in 0..3 {
+                        v[k] += dv[k];
+                    }
                 }
             }
         }
