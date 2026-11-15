@@ -32,9 +32,12 @@ pub struct MobCtx<'a> {
 
 // ---------------- tuning ----------------
 
-/// Zombie hitbox in world px (same footprint as the player).
-pub const W: f32 = 10.0;
-pub const H: f32 = 19.0;
+/// Zombie hitbox in world px: same as the player's, and the 20x40 sprite stands
+/// exactly as tall as the player's 16x40 one.
+pub const W: f32 = player::W;
+pub const H: f32 = player::H;
+/// Where the outstretched arms are, px below the top of the hitbox (claw height).
+const ARM_Y: f32 = 13.0;
 
 /// Base shamble speed (px/s). Each zombie gets a 0.8..1.25 multiplier.
 const WALK_SPEED: f32 = 34.0;
@@ -63,12 +66,12 @@ const TOUCH_DAMAGE: i32 = 1;
 const AGGRO: f32 = 48.0;
 
 /// Spawn distance from the player (px): far enough to be fair, close enough
-/// that they rise on camera (the view is 640 px wide).
+/// that they rise on camera (the view is `shared::VIEW_W` = 768 px wide).
 const SPAWN_MIN: f32 = 150.0;
 const SPAWN_MAX: f32 = 290.0;
 /// Delay after nightfall before the first zombie.
 const FIRST_SPAWN: f32 = 0.8;
-const MAX_ALIVE: usize = 12;
+const MAX_ALIVE: usize = 6;
 
 /// Zombies spawn while daylight is below SPAWN_LIGHT and burn once it's above BURN_LIGHT.
 const SPAWN_LIGHT: f32 = 0.05;
@@ -78,12 +81,12 @@ const BURN_TIME: f32 = 1.6;
 
 /// Seconds between spawns on night `n` (1-based), before jitter.
 fn spawn_interval(nights: u32) -> f32 {
-    (2.3 - 0.25 * nights.saturating_sub(1) as f32).max(0.9)
+    (4.0 - 0.3 * nights.saturating_sub(1) as f32).max(2.0)
 }
 
-/// Max zombies alive at once on night `n`.
+/// Max zombies alive at once on night `n`: 3 on the first night, +1 per night.
 fn max_alive(nights: u32) -> usize {
-    (3 + 2 * nights as usize).min(MAX_ALIVE)
+    (2 + nights as usize).min(MAX_ALIVE)
 }
 
 // ---------------- colours ----------------
@@ -93,7 +96,11 @@ const SKIN: Rgba = rgb(138, 170, 120);
 const SKIN_LO: Rgba = rgb(100, 130, 92);
 const EYE: Rgba = rgb(210, 255, 120);
 const MOUTH: Rgba = rgb(64, 26, 34);
-const SHOES: Rgba = rgb(44, 34, 32);
+const TEETH: Rgba = rgb(226, 218, 190);
+const BLOOD: Rgba = rgb(96, 34, 40);
+const SHOES: Rgba = rgb(58, 44, 40);
+const SHOES_HI: Rgba = rgb(92, 72, 60);
+const SHOES_LO: Rgba = rgb(34, 26, 26);
 const DIRT: Rgba = rgb(134, 88, 58);
 const FIRE: Rgba = rgb(255, 150, 50);
 const ASH: Rgba = rgb(70, 66, 72);
@@ -369,7 +376,7 @@ impl Mobs {
                 MobState::Burning { t } => {
                     let flicker = 110.0 + 70.0 * (t * 37.0).sin();
                     c.sprite_flat(spr, vx, vy, flip, with_alpha(FIRE, flicker as u8));
-                    c.glow(vx + spr.w / 2, vy + spr.h / 2, 12, with_alpha(FIRE, 60));
+                    c.glow(vx + spr.w / 2, vy + spr.h / 2, 18, with_alpha(FIRE, 60));
                 }
                 _ if z.hurt > 0.12 => c.sprite_flat(spr, vx, vy, flip, rgba(255, 255, 255, 210)),
                 _ => {}
@@ -458,7 +465,7 @@ fn update_zombie(z: &mut Mob, dt: f32, ctx: &mut MobCtx, targets: &[(ScreenId, (
                     } else if cx > fx0 + fw {
                         z.facing = -1.0;
                     }
-                    let at = ((cx + z.facing * (W / 2.0 + 3.0)).clamp(fx0, fx0 + fw), (z.y + 5.0).clamp(fy0, fy0 + fh));
+                    let at = ((cx + z.facing * (W / 2.0 + 3.0)).clamp(fx0, fx0 + fw), (z.y + ARM_Y).clamp(fy0, fy0 + fh));
                     claw = Some((id, at));
                 } else if in_x {
                     if fy0 + fh <= z.y {
@@ -556,7 +563,7 @@ fn overlaps(a: (f32, f32, f32, f32), b: (f32, f32, f32, f32)) -> bool {
 
 /// Nudge overlapping zombies apart so a horde reads as a crowd, not one sprite.
 fn separate(list: &mut [Mob], world: &World) {
-    const GAP: f32 = 7.0;
+    const GAP: f32 = 9.0;
     for i in 0..list.len() {
         let (head, tail) = list.split_at_mut(i + 1);
         let a = &mut head[i];
@@ -672,52 +679,143 @@ fn move_y(z: &mut Mob, dy: f32, world: &World) {
 
 /// Body columns (outline to outline) in the unflipped sprite; the hitbox sits on these.
 const BODY_L: i32 = 1;
-const BODY_R: i32 = 10;
+const BODY_R: i32 = 12;
 /// Eye pixel in the unflipped sprite.
-const EYE_X: i32 = 9;
-const EYE_Y: i32 = 4;
+const EYE_X: i32 = 11;
+const EYE_Y: i32 = 6;
 
-/// Head and torso, facing right with arms stretched out in front.
-const TOP: [&str; 15] = [
-    "...oooooo.......",
-    "..ohhhhhhoo.....",
-    ".ohhhhhhhhho....",
-    ".ohhkkkkkkko....",
-    ".ohkkkkkoeko....",
-    "..okkkkkkkko....",
-    "..oKkkkmmmko....",
-    "...oKkkkkko.....",
-    "..owwwtwwoooooo.",
-    ".owwwwtTwwwkkkko",
-    ".owWwwtTwWWKKKko",
-    ".owWwwtTwoooooo.",
-    ".oWwwwwtwwo.....",
-    ".oWWwKwwwWo.....",
-    "..opppppppo.....",
+// 20x40 frames, facing right, arms stretched out in front. Same height as the
+// player's 16x40 sprite, and built the same way: 18x38 art plus a 1 px outline.
+/// Head, torso and both arms (shared by every frame).
+const TOP: [&str; 27] = [
+    ".....oooooo.........",
+    "....ohhhhhhoo.......",
+    "...ohhhhhhhhho......",
+    "..ohhhhhhhhhho......",
+    "..ohhhhkkkkkko......",
+    "..ohhhkkkkkkko......",
+    "..ohhkkkkkKeko......",
+    "..ohkKkkkkKeko......",
+    "..ohKKkkkkkkkko.....",
+    "..ohKkkkkkKKko......",
+    "..oKkkkkkmnmKo......",
+    "...oKkkkkmmmKo......",
+    "..oooKKkkkKoo.......",
+    ".owwwwkttkwwoooooo..",
+    ".owwwwwtTwwWWWKKKKo.",
+    ".oWwwwwtTwwWWWKKKKKo",
+    ".oWwwwwtTwwwooooooo.",
+    ".oWwwWwwwwwwwwkkkkko",
+    ".oWwwWWWWWWWWWkkkkKo",
+    ".oWwwwwtTwwWooooooo.",
+    ".oWwwwwwtTwWo.......",
+    ".oWWwrwwwtwWo.......",
+    ".oWWrrwwwwWWo.......",
+    ".oWWwKwwwwWWo.......",
+    ".oWWowwWowWWo.......",
+    "..opppppppPPo.......",
+    "..opppppppPPo.......",
 ];
-const LEGS_IDLE: [&str; 4] = ["..opPo.opPo.....", "..opPo.opPo.....", "..opPo.opPo.....", "..osso.osso....."];
-const LEGS_W1: [&str; 4] = ["..opPo.opPo.....", ".opPo...opPo....", ".opPo....opo....", ".osso....osso..."];
-const LEGS_W2: [&str; 4] = ["..opPoopPo......", "...opPopPo......", "...opPoPo.......", "...ossoso......."];
-const LEGS_W3: [&str; 4] = [".opPo..opPo.....", ".opPo...opPo....", "opPo.....opo....", "osso.....osso..."];
+/// Legs and shoes per frame. Walk: contact, back leg passing, contact (legs swapped), front leg passing.
+const LEGS_IDLE: [&str; 13] = [
+    "...oPQQppPoo........",
+    "...oPQQppPo.........",
+    "...oPQQppPo.........",
+    "...oPQQppPo.........",
+    "..oPQQooppPo........",
+    "..oPQQooppPo........",
+    "..oPQQooppPo........",
+    "..oPQQooppPo........",
+    "..ozzzooSSSo........",
+    "..ozzzzoSssso.......",
+    "..ozzzzzssssso......",
+    "..ozzzzzzzzzzo......",
+    "...oooooooooo.......",
+];
+const LEGS_W1: [&str; 13] = [
+    "...oPQQppPoo........",
+    "...oPQQppPo.........",
+    "..oPQQooppPo........",
+    "..oPQQooppPo........",
+    "..oPQQooppPo........",
+    "..oPQQooppPo........",
+    ".oPQQo..oppPo.......",
+    ".oPQQo..oppPo.......",
+    ".ozzzo..oSSSo.......",
+    ".ozzzzo.oSssso......",
+    ".ozzzzzoossssso.....",
+    ".ozzzzzoozzzzzo.....",
+    "..ooooo..ooooo......",
+];
+const LEGS_W2: [&str; 13] = [
+    "...oPQQppPoo........",
+    "...oPQQppPo.........",
+    "...oPQQppPo.........",
+    "....oPQppPo.........",
+    "....oPQppPo.........",
+    "....oPQppPo.........",
+    "....ozzppPo.........",
+    "....ozzppPo.........",
+    "....ozzSSSo.........",
+    "....ozzSssso........",
+    ".....oossssso.......",
+    "......ozzzzzo.......",
+    ".......ooooo........",
+];
+const LEGS_W3: [&str; 13] = [
+    "...oPQQppPoo........",
+    "....oPppPo..........",
+    "....oPppPo..........",
+    "....oppPQo..........",
+    "....oppPQo..........",
+    "...oppPPQQo.........",
+    "...oppPPQQo.........",
+    "..oppPooPQQo........",
+    "..oSSSoozzzo........",
+    "..oSsssozzzzo.......",
+    "..ossssszzzzzo......",
+    "..ozzzzzzzzzzo......",
+    "...oooooooooo.......",
+];
+const LEGS_W4: [&str; 13] = [
+    "...oPQQppPoo........",
+    "...oPQQppPo.........",
+    "....oPQppPo.........",
+    "....oPppPo..........",
+    "....oPppPo..........",
+    "....oPppPo..........",
+    ".....oSSSo..........",
+    ".....oSssso.........",
+    ".....ossssso........",
+    ".....ozzzzzo........",
+    ".....ozzzzzo........",
+    ".....ozzzzzo........",
+    "......ooooo.........",
+];
 
 fn zombie_sprites() -> Vec<ZombieFrames> {
     LOOKS
         .iter()
         .map(|look| {
-            let pal: [(char, Rgba); 13] = [
+            let pal: [(char, Rgba); 18] = [
                 ('o', OUTLINE),
                 ('h', look.hair),
                 ('k', SKIN),
                 ('K', SKIN_LO),
                 ('e', EYE),
                 ('m', MOUTH),
+                ('n', TEETH),
+                ('r', BLOOD),
                 ('w', look.shirt),
                 ('W', look.shirt_lo),
                 ('t', look.tie),
                 ('T', look.tie_lo),
                 ('p', look.pants),
                 ('P', look.pants_lo),
+                ('Q', shade(look.pants_lo, 0.75)),
                 ('s', SHOES),
+                ('S', SHOES_HI),
+                ('z', SHOES_LO),
             ];
             let build = |legs: &[&str]| {
                 let rows: Vec<&str> = TOP.iter().chain(legs.iter()).copied().collect();
@@ -725,7 +823,7 @@ fn zombie_sprites() -> Vec<ZombieFrames> {
             };
             ZombieFrames {
                 idle: build(&LEGS_IDLE),
-                walk: [build(&LEGS_W1), build(&LEGS_W2), build(&LEGS_W3), build(&LEGS_W2)],
+                walk: [build(&LEGS_W1), build(&LEGS_W2), build(&LEGS_W3), build(&LEGS_W4)],
             }
         })
         .collect()
@@ -761,13 +859,14 @@ mod tests {
 
     #[test]
     fn sprites_are_well_formed() {
-        for rows in [&TOP[..], &LEGS_IDLE[..], &LEGS_W1[..], &LEGS_W2[..], &LEGS_W3[..]] {
+        for rows in [&TOP[..], &LEGS_IDLE[..], &LEGS_W1[..], &LEGS_W2[..], &LEGS_W3[..], &LEGS_W4[..]] {
             for r in rows {
-                assert_eq!(r.chars().count(), 16, "sprite row {r:?}");
+                assert_eq!(r.chars().count(), 20, "sprite row {r:?}");
             }
         }
         let m = Mobs::new();
-        assert_eq!(m.sprites[0].idle.h, H as i32);
+        assert_eq!(m.sprites[0].idle.h, crate::sprites::PLAYER_H, "zombies stand as tall as the player");
+        assert_eq!(BODY_R - BODY_L + 1, W as i32, "hitbox sits on the body columns");
         assert!(m.sprites[0].idle.get(EYE_X, EYE_Y)[3] > 0, "eye pixel must be on the sprite");
     }
 
