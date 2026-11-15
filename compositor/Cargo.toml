@@ -1,0 +1,8 @@
+[package]
+name = "compositor"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+shared = { path = "../shared" }
+game = { path = "../game" }

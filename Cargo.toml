@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = ["shared", "game", "compositor"]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+
+# Keep debug builds playable: our code lightly optimised, dependencies fully.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+debug = 1
